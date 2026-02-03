@@ -1,255 +1,175 @@
-$ErrorActionPreference = "Stop"
+# setup-dev-vm.ps1
+# Fully automated Windows setup for a Linux dev VM
+# Includes VirtualBox + Vagrant installation, VM provisioning with Docker, Kubernetes, Node.js, JDK21, VS Code, k9s
 
-$ProjectDir = "$HOME\fedora-dev-vm"
+# -----------------------------
+# Step 1: Prompt user for configuration
+# -----------------------------
+$VMName = Read-Host "Enter a name for your VM (default: dev-vm)"
+if ([string]::IsNullOrEmpty($VMName)) { $VMName = "dev-vm" }
 
-Write-Host ""
-Write-Host "🚀 Fedora Dev VM Interactive Setup"
-Write-Host ""
+$CPUs = Read-Host "Enter number of CPUs for VM (default 4)"
+if ([string]::IsNullOrEmpty($CPUs)) { $CPUs = 4 }
 
-# -------------------------------------------------
-# Prompt user for configuration
-# -------------------------------------------------
-$GithubToken   = Read-Host "🔐 Enter your GitHub token (leave blank to skip)"
-$DockerToken  = Read-Host "🐳 Enter your Docker Hub token (leave blank to skip)"
-$CpuCount     = Read-Host "🧠 Number of CPUs for the VM (default: 4)"
-$MemoryGB     = Read-Host "💾 Memory in GB for the VM (default: 8)"
+$Memory = Read-Host "Enter memory in MB for VM (default 8192)"
+if ([string]::IsNullOrEmpty($Memory)) { $Memory = 8192 }
 
-if (-not $CpuCount) { $CpuCount = 4 }
-if (-not $MemoryGB) { $MemoryGB = 8 }
+$Port = Read-Host "Enter host port to forward to VM (default 8080)"
+if ([string]::IsNullOrEmpty($Port)) { $Port = 8080 }
 
-$MemoryMB = [int]$MemoryGB * 1024
+$GitHubToken = Read-Host "Enter your GitHub token"
+$DockerHubToken = Read-Host "Enter your Docker Hub token"
 
-Write-Host ""
-Write-Host "📋 Configuration Summary"
-Write-Host "  CPUs:    $CpuCount"
-Write-Host "  Memory:  $MemoryGB GB"
-Write-Host "  GitHub:  $([bool]$GithubToken)"
-Write-Host "  Docker:  $([bool]$DockerToken)"
-Write-Host ""
-
-# -------------------------------------------------
-# Allow script execution
-# -------------------------------------------------
-Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
-
-# -------------------------------------------------
-# Install Scoop
-# -------------------------------------------------
+# -----------------------------
+# Step 2: Install Scoop if missing
+# -----------------------------
 if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {
-    Write-Host "📦 Installing Scoop..."
-    Invoke-RestMethod https://get.scoop.sh | Invoke-Expression
+    Write-Host "Installing Scoop..."
+    Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+    iwr -useb get.scoop.sh | iex
 }
 
-scoop bucket add main    | Out-Null
-scoop bucket add extras | Out-Null
+# -----------------------------
+# Step 3: Install VirtualBox with extension pack
+# -----------------------------
+Write-Host "Installing VirtualBox with extension pack..."
+if (-not (scoop bucket list | Select-String "nonportable")) {
+    scoop bucket add nonportable
+}
+scoop install nonportable/virtualbox-with-extension-pack-np
 
-# -------------------------------------------------
-# Install VirtualBox
-# -------------------------------------------------
-if (-not (Get-Command VBoxManage -ErrorAction SilentlyContinue)) {
-    Write-Host "📦 Installing VirtualBox..."
-    scoop install virtualbox
+# Add VirtualBox to PATH
+$VBoxPath = "$env:USERPROFILE\scoop\apps\virtualbox-with-extension-pack-np\current"
+if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $VBoxPath })) {
+    Write-Host "Adding VirtualBox to PATH..."
+    [Environment]::SetEnvironmentVariable("PATH", "$env:PATH;$VBoxPath", [EnvironmentVariableTarget]::User)
+    $env:PATH += ";$VBoxPath"
 }
 
-# -------------------------------------------------
-# Install Vagrant
-# -------------------------------------------------
-if (-not (Get-Command vagrant -ErrorAction SilentlyContinue)) {
-    Write-Host "📦 Installing Vagrant..."
-    scoop install vagrant
+# -----------------------------
+# Step 4: Install Vagrant
+# -----------------------------
+Write-Host "Installing Vagrant..."
+if (-not (scoop bucket list | Select-String "main")) {
+    scoop bucket add main
+}
+scoop install main/vagrant
+
+# Add Scoop shims to PATH (includes Vagrant)
+$ScoopShims = "$env:USERPROFILE\scoop\shims"
+if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $ScoopShims })) {
+    Write-Host "Adding Scoop shims to PATH..."
+    [Environment]::SetEnvironmentVariable("PATH", "$env:PATH;$ScoopShims", [EnvironmentVariableTarget]::User)
+    $env:PATH += ";$ScoopShims"
 }
 
-# -------------------------------------------------
-# Create project directory
-# -------------------------------------------------
-New-Item -ItemType Directory -Force -Path $ProjectDir | Out-Null
-Set-Location $ProjectDir
+# -----------------------------
+# Step 5: Install VS Code and vcredist2022
+# -----------------------------
+if (-not (scoop bucket list | Select-String "extras")) {
+    Write-Host "Adding extras bucket..."
+    scoop bucket add extras
+}
 
-# -------------------------------------------------
-# default.yaml
-# -------------------------------------------------
-@'
-vm:
-  name: fedora-dev-env
-  cpus: 4
-  memory: 8192
+Write-Host "Installing VS Code..."
+scoop install extras/vscode
 
-ports:
-  - host: 8080
-    guest: 8080
+Write-Host "Installing Visual C++ Redistributable 2022 (vcredist2022)..."
+scoop install extras/vcredist2022
 
-synced_folder:
-  host: .
-  guest: /home/vagrant/workspace
-'@ | Out-File -Encoding UTF8 default.yaml
+# -----------------------------
+# Step 6: Verify installations
+# -----------------------------
+vboxmanage --version
+vagrant --version
+code --version
 
-# -------------------------------------------------
-# env.yaml (generated from prompts)
-# -------------------------------------------------
-@"
-vm:
-  cpus: $CpuCount
-  memory: $MemoryMB
-"@ | Out-File -Encoding UTF8 env.yaml
+# -----------------------------
+# Step 7: Create workspace folder
+# -----------------------------
+$workspace = Join-Path $PWD "workspace"
+if (-not (Test-Path $workspace)) { New-Item -ItemType Directory -Path $workspace }
 
-# -------------------------------------------------
-# Vagrantfile
-# -------------------------------------------------
-@'
-require "yaml"
+# -----------------------------
+# Step 8: Generate Vagrantfile dynamically
+# -----------------------------
+$VagrantfilePath = Join-Path $PWD "Vagrantfile"
 
-default_config = YAML.load_file("default.yaml")
-env_config = File.exist?("env.yaml") ? YAML.load_file("env.yaml") : {}
-
-def deep_merge(a, b)
-  a.merge(b) do |_, old, new|
-    old.is_a?(Hash) && new.is_a?(Hash) ? deep_merge(old, new) : new
-  end
-end
-
-config_data = deep_merge(default_config, env_config)
-
+$VagrantfileContent = @"
 Vagrant.configure("2") do |config|
-  config.vm.box = "fedora/39-cloud-base"
-
+  config.vm.box = "fedora/38-cloud-base"
+  config.vm.hostname = "$VMName"
+  config.vm.network "forwarded_port", guest: 8080, host: $Port
   config.vm.provider "virtualbox" do |vb|
-    vb.name   = config_data.dig("vm", "name")
-    vb.cpus   = config_data.dig("vm", "cpus")
-    vb.memory = config_data.dig("vm", "memory")
+    vb.memory = "$Memory"
+    vb.cpus = $CPUs
   end
+  config.vm.synced_folder "$workspace", "/home/vagrant/workspace", type: "virtualbox"
+  
+  config.vm.provision "shell", inline: <<-SHELL
+    # Update system
+    sudo dnf -y update
 
-  Array(config_data["ports"]).each do |p|
-    config.vm.network "forwarded_port",
-      guest: p["guest"],
-      host: p["host"],
-      auto_correct: true
-  end
+    # Install dependencies
+    sudo dnf -y install curl git
 
-  sf = config_data["synced_folder"]
-  config.vm.synced_folder sf["host"], sf["guest"],
-    create: true,
-    mount_options: ["dmode=775,fmode=664"]
+    # Install Node.js
+    curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo bash -
+    sudo dnf -y install nodejs
 
-  config.vm.provision "shell", path: "provision.sh"
+    # Install JDK21
+    sudo dnf -y install java-21-openjdk
+
+    # Install Docker
+    sudo dnf -y install dnf-plugins-core
+    sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+    sudo dnf -y install docker-ce docker-ce-cli containerd.io
+    sudo systemctl enable docker --now
+    sudo usermod -aG docker vagrant
+
+    # Install kind
+    curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.22.0/kind-linux-amd64
+    chmod +x ./kind
+    sudo mv ./kind /usr/local/bin/kind
+
+    # Install kubectl
+    curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    chmod +x kubectl
+    sudo mv kubectl /usr/local/bin/
+
+    # Install k9s
+    curl -s https://api.github.com/repos/derailed/k9s/releases/latest \
+      | grep "browser_download_url.*linux_amd64.tar.gz" \
+      | cut -d '"' -f 4 \
+      | xargs curl -L -o k9s.tar.gz
+    tar -xzf k9s.tar.gz
+    sudo mv k9s /usr/local/bin/
+    rm k9s.tar.gz
+
+    # Add GitHub and DockerHub tokens to .bashrc
+    echo "export GITHUB_TOKEN=$GitHubToken" >> /home/vagrant/.bashrc
+    echo "export DOCKERHUB_TOKEN=$DockerHubToken" >> /home/vagrant/.bashrc
+
+    # Create workspace folder inside VM
+    mkdir -p /home/vagrant/workspace
+
+    # Start kind cluster
+    kind create cluster --name dev-cluster
+
+  SHELL
 end
-'@ | Out-File -Encoding UTF8 Vagrantfile
+"@
 
-# -------------------------------------------------
-# provision.sh
-# -------------------------------------------------
-@"
-#!/usr/bin/env bash
-set -e
+Set-Content -Path $VagrantfilePath -Value $VagrantfileContent -Force
+Write-Host "Vagrantfile created at $VagrantfilePath"
 
-GITHUB_TOKEN="$GithubToken"
-DOCKER_TOKEN="$DockerToken"
-
-sudo dnf update -y
-
-sudo dnf install -y curl wget git unzip tar gcc-c++ make ca-certificates gnupg lsb-release
-
-# Node.js
-curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo bash -
-sudo dnf install -y nodejs
-
-# Java
-sudo dnf install -y java-21-openjdk java-21-openjdk-devel
-
-# VS Code
-sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
-cat <<REPO | sudo tee /etc/yum.repos.d/vscode.repo
-[code]
-name=Visual Studio Code
-baseurl=https://packages.microsoft.com/yumrepos/vscode
-enabled=1
-gpgcheck=1
-gpgkey=https://packages.microsoft.com/keys/microsoft.asc
-REPO
-sudo dnf install -y code
-
-# Docker
-sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
-sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-sudo systemctl enable docker
-sudo systemctl start docker
-sudo usermod -aG docker vagrant
-
-# kubectl
-KUBECTL_VERSION=\$(curl -Ls https://dl.k8s.io/release/stable.txt)
-curl -LO "https://dl.k8s.io/release/\${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
-sudo install -m 0755 kubectl /usr/local/bin/kubectl
-rm -f kubectl
-
-# kind
-curl -Lo kind https://kind.sigs.k8s.io/dl/v0.22.0/kind-linux-amd64
-chmod +x kind
-sudo mv kind /usr/local/bin/kind
-
-# k9s
-curl -L https://github.com/derailed/k9s/releases/download/v0.32.5/k9s_Linux_amd64.tar.gz -o /tmp/k9s.tar.gz
-tar -xzf /tmp/k9s.tar.gz -C /tmp
-sudo mv /tmp/k9s /usr/local/bin/k9s
-sudo chmod +x /usr/local/bin/k9s
-rm -f /tmp/k9s.tar.gz
-
-# Bash env
-mkdir -p /home/vagrant/.bashrc.d
-
-cat <<EOF > /home/vagrant/.bashrc.d/dev-env.sh
-export WORKSPACE="\$HOME/workspace"
-export NODE_ENV=development
-
-export JAVA_HOME="\$(dirname \$(dirname \$(readlink -f \$(which javac))))"
-export PATH="\$JAVA_HOME/bin:\$PATH"
-
-# GitHub token
-if [ -n "$GithubToken" ]; then
-  export GITHUB_TOKEN="$GithubToken"
-  git config --global url."https://$GithubToken@github.com/".insteadOf "https://github.com/"
-fi
-
-# Docker Hub token
-if [ -n "$DockerToken" ]; then
-  echo "$DockerToken" | docker login --username "$GithubToken" --password-stdin || true
-fi
-EOF
-
-# Load bashrc.d
-if ! grep -q bashrc.d /home/vagrant/.bashrc; then
-cat <<EOF >> /home/vagrant/.bashrc
-if [ -d "\$HOME/.bashrc.d" ]; then
-  for f in "\$HOME/.bashrc.d/"*.sh; do
-    [ -r "\$f" ] && source "\$f"
-  done
-fi
-EOF
-fi
-
-# Kubernetes cluster
-sudo -u vagrant bash <<EOF
-if ! kind get clusters | grep -q dev-cluster; then
-  kind create cluster --name dev-cluster
-fi
-EOF
-
-sudo usermod -aG vboxsf vagrant
-chown -R vagrant:vagrant /home/vagrant/.bashrc.d
-"@ | Out-File -Encoding UTF8 provision.sh
-
-# -------------------------------------------------
-# Start VM
-# -------------------------------------------------
-Write-Host ""
-Write-Host "🐧 Starting VM (this may take several minutes)..."
+# -----------------------------
+# Step 9: Bring up the VM
+# -----------------------------
+Write-Host "Starting VM..."
 vagrant up
 
-Write-Host ""
-Write-Host "🎉 SETUP COMPLETE"
-Write-Host "Next:"
-Write-Host "  cd $ProjectDir"
-Write-Host "  vagrant reload"
-Write-Host "  vagrant ssh"
-Write-Host ""
-Write-Host "Inside the VM:"
-Write-Host "  kubectl get nodes"
-Write-Host "  k9s"
+Write-Host "`nDev VM setup complete!"
+Write-Host "Connect to VM: vagrant ssh"
+Write-Host "Workspace synced to VM: /home/vagrant/workspace"
+Write-Host "Kubernetes cluster inside VM is ready."
