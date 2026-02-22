@@ -1,0 +1,11 @@
+# User-specific config overrides
+vagrant/env.yaml
+
+# Vagrant artifacts
+vagrant/Vagrantfile
+vagrant/.vagrant/
+vagrant/setup-dev-vm.log
+
+# OS files
+.DS_Store
+Thumbs.db
