@@ -1,0 +1,23 @@
+vm:
+  name: dev-vm
+  cpus: 4
+  memory: 8192
+  disk_gb: 80
+  private_ip: 192.168.56.10
+
+ports:
+  - guest: 6443
+    host: 6443
+    description: k3s API
+  - guest: 8080
+    host: 8080
+    description: App server
+  - guest: 3000
+    host: 3000
+    description: Dev server
+  - guest: 30000
+    host: 30000
+    description: NodePort
+  - guest: 443
+    host: 8443
+    description: Ingress HTTPS
