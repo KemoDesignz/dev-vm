@@ -84,6 +84,8 @@ The shared workspace folder is created at `~/workspace` (your home directory) an
 ### Windows
 
 ```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Unrestricted
+
 git clone <repo-url>
 cd <repo-directory>
 .\scripts\setup-dev-vm.ps1
