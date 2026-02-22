@@ -994,7 +994,7 @@ if (-not $PSBoundParameters.ContainsKey('DockerHubUser')) {
         $DockerHubUser = $creds.dockerhub_user
         Write-Ok "Docker Hub user loaded from env.yaml ($DockerHubUser)"
     } else {
-        $DockerHubUser = Read-Default 'Docker Hub user  (optional, Enter to skip)' ''
+        $DockerHubUser = (Read-Host '  Docker Hub user  (optional, Enter to skip)').Trim()
         if ($DockerHubUser) { $credentialsEnteredInteractively = $true }
     }
 }
