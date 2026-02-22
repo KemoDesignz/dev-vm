@@ -981,7 +981,7 @@ $credentialsEnteredInteractively = $false
 $creds = $yamlConfig.credentials
 
 if (-not $PSBoundParameters.ContainsKey('GitHubToken')) {
-    if ($creds.github_token) {
+    if ($creds.ContainsKey('github_token') -and $creds.github_token) {
         $GitHubToken = $creds.github_token
         Write-Ok 'GitHub token loaded from env.yaml'
     } else {
@@ -990,7 +990,7 @@ if (-not $PSBoundParameters.ContainsKey('GitHubToken')) {
     }
 }
 if (-not $PSBoundParameters.ContainsKey('DockerHubUser')) {
-    if ($creds.dockerhub_user) {
+    if ($creds.ContainsKey('dockerhub_user') -and $creds.dockerhub_user) {
         $DockerHubUser = $creds.dockerhub_user
         Write-Ok "Docker Hub user loaded from env.yaml ($DockerHubUser)"
     } else {
@@ -999,7 +999,7 @@ if (-not $PSBoundParameters.ContainsKey('DockerHubUser')) {
     }
 }
 if (-not $PSBoundParameters.ContainsKey('DockerHubToken')) {
-    if ($creds.dockerhub_token) {
+    if ($creds.ContainsKey('dockerhub_token') -and $creds.dockerhub_token) {
         $DockerHubToken = $creds.dockerhub_token
         Write-Ok 'Docker Hub token loaded from env.yaml'
     } else {
