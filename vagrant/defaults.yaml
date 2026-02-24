@@ -1,8 +1,8 @@
 vm:
   name: dev-vm
-  cpus: 4
-  memory: 8192
-  disk_gb: 80
+  cpus: 8
+  memory: 16384
+  disk_gb: 120
   private_ip: 192.168.56.10
 
 ports:
@@ -21,3 +21,63 @@ ports:
   - guest: 443
     host: 8443
     description: Ingress HTTPS
+  - guest: 5432
+    host: 5432
+    description: PostgreSQL
+  - guest: 3306
+    host: 3306
+    description: MySQL
+  - guest: 6379
+    host: 6379
+    description: Redis
+  - guest: 27017
+    host: 27017
+    description: MongoDB
+  - guest: 9092
+    host: 9092
+    description: Kafka
+  - guest: 5672
+    host: 5672
+    description: RabbitMQ
+  - guest: 9200
+    host: 9200
+    description: Elasticsearch
+  - guest: 9090
+    host: 9090
+    description: Prometheus
+  - guest: 3001
+    host: 3001
+    description: Additional dev server
+  - guest: 4200
+    host: 4200
+    description: Angular dev server
+  - guest: 5173
+    host: 5173
+    description: Vite dev server
+  - guest: 4000
+    host: 4000
+    description: Moctra Frontend (React + BFF)
+  - guest: 8180
+    host: 8180
+    description: Keycloak
+  - guest: 9000
+    host: 9000
+    description: MinIO S3 API
+  - guest: 9001
+    host: 9001
+    description: MinIO Console
+  - guest: 7880
+    host: 7880
+    description: LiveKit HTTP API
+  - guest: 16686
+    host: 16686
+    description: Jaeger UI
+  - guest: 3100
+    host: 3100
+    description: Grafana
+  - guest: 8025
+    host: 8025
+    description: MailHog UI
+  - guest: 8090
+    host: 8090
+    description: Kafka UI

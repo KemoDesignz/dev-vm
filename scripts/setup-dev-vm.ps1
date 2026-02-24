@@ -7,7 +7,7 @@
 
 <#
 .SYNOPSIS
-    Provisions an Ubuntu 24.04 LTS dev VM with Docker, k3s, Helm, Java 21, Node.js, and CLI tools.
+    Provisions an Ubuntu 24.04 LTS dev VM with Docker, k3s, Helm, Java 21, Maven, Node.js, and CLI tools.
 
 .DESCRIPTION
     Cross-platform (Windows & macOS) interactive or parameterised script that:
@@ -419,7 +419,7 @@ kubectl get nodes 2>/dev/null | grep -q ' Ready' && echo "READY" || echo "NOT_RE
     $script:toolsToRepair = $null
     $toolCheckOutput = (vagrant ssh -c @'
 MISSING=""
-for tool in docker k3s kubectl helm java node npm k9s yq lazydocker kubectx kubens; do
+for tool in docker k3s kubectl helm java node npm k9s yq lazydocker kubectx kubens stern gh gradle terraform python3 psql mysql redis-cli yarn pnpm; do
     if ! command -v "$tool" &>/dev/null; then
         MISSING="$MISSING $tool"
     fi
@@ -716,6 +716,7 @@ printf "  %-14s %s\n" "k3s:"         "$(k3s --version 2>/dev/null | head -1 || e
 printf "  %-14s %s\n" "kubectl:"     "$(kubectl version --client --short 2>/dev/null || kubectl version --client 2>/dev/null | head -1 || echo 'NOT FOUND')"
 printf "  %-14s %s\n" "Helm:"        "$(helm version --short 2>/dev/null || echo 'NOT FOUND')"
 printf "  %-14s %s\n" "Java:"        "$(java -version 2>&1 | head -1 || echo 'NOT FOUND')"
+printf "  %-14s %s\n" "Maven:"       "$(mvn --version 2>&1 | head -1 || echo 'NOT FOUND')"
 printf "  %-14s %s\n" "Node:"        "$(node -v 2>/dev/null || echo 'NOT FOUND')"
 printf "  %-14s %s\n" "npm:"         "$(npm -v 2>/dev/null || echo 'NOT FOUND')"
 printf "  %-14s %s\n" "k9s:"         "$(k9s version --short 2>/dev/null || echo 'installed')"
@@ -1200,6 +1201,118 @@ if (Get-Command docker -ErrorAction SilentlyContinue) {
 }
 
 # ─────────────────────────────────────────────────────────────
+# 3d. Install Temurin JDK 21 on host (if missing)
+# ─────────────────────────────────────────────────────────────
+Write-Step 'Checking Temurin JDK 21 (host)'
+$javaCmd = Get-Command java -ErrorAction SilentlyContinue
+$hasTemurin21 = $false
+if ($javaCmd) {
+    $javaVerOutput = & java -version 2>&1 | Out-String
+    if ($javaVerOutput -match '21\.' -and $javaVerOutput -match 'Temurin') {
+        $hasTemurin21 = $true
+    }
+}
+if (-not $hasTemurin21) {
+    if ($IsWin) {
+        Write-Warn 'Temurin JDK 21 not found - installing via winget...'
+        winget install --id EclipseAdoptium.Temurin.21.JDK --source winget `
+            --accept-package-agreements --accept-source-agreements
+    } else {
+        Write-Warn 'Temurin JDK 21 not found - installing via Homebrew...'
+        brew install --cask temurin@21
+    }
+    Refresh-Path
+}
+
+# Set JAVA_HOME on the host
+if (Get-Command java -ErrorAction SilentlyContinue) {
+    $javaVer = & java -version 2>&1 | Select-Object -First 1
+    Write-Ok "Java: $javaVer"
+
+    if ($IsWin) {
+        # Resolve JAVA_HOME from the java.exe path (e.g. C:\Program Files\Eclipse Adoptium\jdk-21...\bin\java.exe -> parent\parent)
+        $javaExe = (Get-Command java).Source
+        $javaHome = Split-Path (Split-Path $javaExe -Parent) -Parent
+        $env:JAVA_HOME = $javaHome
+        # Persist JAVA_HOME for future sessions
+        $currentJH = [System.Environment]::GetEnvironmentVariable('JAVA_HOME', 'User')
+        if ($currentJH -ne $javaHome) {
+            [System.Environment]::SetEnvironmentVariable('JAVA_HOME', $javaHome, 'User')
+            Write-Ok "JAVA_HOME set to $javaHome (User environment)"
+        } else {
+            Write-Ok "JAVA_HOME already set: $javaHome"
+        }
+    } else {
+        # macOS: resolve symlinks to get the real JDK path
+        $javaExe = & readlink -f (Get-Command java).Source 2>/dev/null
+        if (-not $javaExe) { $javaExe = (Get-Command java).Source }
+        $javaHome = Split-Path (Split-Path $javaExe -Parent) -Parent
+        $env:JAVA_HOME = $javaHome
+        Write-Ok "JAVA_HOME set to $javaHome (current session)"
+    }
+} else {
+    Write-Warn 'Java not found after install attempt.'
+    if ($IsWin) {
+        Write-Warn 'Install manually: winget install EclipseAdoptium.Temurin.21.JDK'
+    } else {
+        Write-Warn 'Install manually: brew install --cask temurin@21'
+    }
+}
+
+# ─────────────────────────────────────────────────────────────
+# 3e. Install Maven on host (if missing)
+# ─────────────────────────────────────────────────────────────
+Write-Step 'Checking Maven (host)'
+if (-not (Get-Command mvn -ErrorAction SilentlyContinue)) {
+    if ($IsWin) {
+        Write-Warn 'Maven not found - installing via winget...'
+        winget install --id Apache.Maven --source winget `
+            --accept-package-agreements --accept-source-agreements
+    } else {
+        Write-Warn 'Maven not found - installing via Homebrew...'
+        brew install maven
+    }
+    Refresh-Path
+}
+
+# Set MAVEN_HOME / M2_HOME on the host
+if (Get-Command mvn -ErrorAction SilentlyContinue) {
+    Write-Ok "Maven $(mvn --version 2>$null | Select-Object -First 1)"
+
+    if ($IsWin) {
+        # Resolve MAVEN_HOME from mvn.cmd path (e.g. ...\apache-maven-x.y.z\bin\mvn.cmd -> parent\parent)
+        $mvnExe = (Get-Command mvn).Source
+        $mavenHome = Split-Path (Split-Path $mvnExe -Parent) -Parent
+        $env:MAVEN_HOME = $mavenHome
+        $env:M2_HOME = $mavenHome
+        # Persist for future sessions
+        $currentMH = [System.Environment]::GetEnvironmentVariable('MAVEN_HOME', 'User')
+        if ($currentMH -ne $mavenHome) {
+            [System.Environment]::SetEnvironmentVariable('MAVEN_HOME', $mavenHome, 'User')
+            [System.Environment]::SetEnvironmentVariable('M2_HOME', $mavenHome, 'User')
+            Write-Ok "MAVEN_HOME set to $mavenHome (User environment)"
+        } else {
+            Write-Ok "MAVEN_HOME already set: $mavenHome"
+        }
+    } else {
+        # macOS: resolve from mvn binary
+        $mvnExe = & readlink -f (Get-Command mvn).Source 2>/dev/null
+        if (-not $mvnExe) { $mvnExe = (Get-Command mvn).Source }
+        $mavenHome = Split-Path (Split-Path $mvnExe -Parent) -Parent
+        $env:MAVEN_HOME = $mavenHome
+        $env:M2_HOME = $mavenHome
+        Write-Ok "MAVEN_HOME set to $mavenHome (current session)"
+    }
+} else {
+    Write-Warn 'Maven not found after install attempt.'
+    if ($IsWin) {
+        Write-Warn 'Install manually: winget install Apache.Maven'
+    } else {
+        Write-Warn 'Install manually: brew install maven'
+    }
+}
+
+# ─────────────────────────────────────────────────────────────
 # 4. Create workspace folder
 # ─────────────────────────────────────────────────────────────
 $workspace = Join-Path $homeDir 'workspace'
@@ -1324,8 +1437,12 @@ Vagrant.configure("2") do |config|
     sudo apt-get install -y --no-install-recommends \
       curl git jq tar unzip bash-completion apt-transport-https ca-certificates \
       gnupg lsb-release htop tmux vim tree make gcc libssl-dev \
+      postgresql-client mysql-client redis-tools \
+      python3 python3-pip python3-venv \
+      netcat-openbsd dnsutils iputils-ping telnet \
+      zip p7zip-full wget net-tools \
       2>&1 | tail -5
-    echo "  + Base packages installed"
+    echo "  + Base packages installed (including database clients, Python3, network tools)"
   SHELL
 
   # --- Stage 2: Java 21 ---
@@ -1335,6 +1452,15 @@ Vagrant.configure("2") do |config|
     export DEBIAN_FRONTEND=noninteractive
     sudo apt-get install -y --no-install-recommends openjdk-21-jdk-headless 2>&1 | tail -3
     echo "  + Java: $(java -version 2>&1 | head -1)"
+  SHELL
+
+  # --- Stage 2b: Maven ---
+  config.vm.provision "shell", name: "maven", inline: <<-'SHELL'
+    set -euo pipefail
+    echo ">>> Installing Maven"
+    export DEBIAN_FRONTEND=noninteractive
+    sudo apt-get install -y --no-install-recommends maven 2>&1 | tail -3
+    echo "  + Maven: $(mvn --version 2>&1 | head -1)"
   SHELL
 
   # --- Stage 3: Node.js LTS ---
@@ -1500,7 +1626,139 @@ OVERRIDE
     sudo mv /tmp/lazydocker /usr/local/bin/
     rm -f /tmp/lazydocker.tar.gz
 
-    echo "  + CLI tools installed: k9s, kubectx, kubens, yq, lazydocker"
+    echo ">>> Installing stern (Kubernetes log viewer)"
+    STERN_REL=$(gh_api https://api.github.com/repos/stern/stern/releases/latest)
+    STERN_URL=$(extract_url "$STERN_REL" "browser_download_url.*linux_amd64.tar.gz")
+    STERN_CHECKSUMS=$(extract_url "$STERN_REL" "browser_download_url.*checksums.txt")
+    if [ -z "$STERN_URL" ]; then echo "  ! Failed to get stern download URL, skipping" >&2; else
+      curl -sL -o /tmp/stern.tar.gz "$STERN_URL"
+      verify_checksum /tmp/stern.tar.gz "$STERN_CHECKSUMS" "$(basename "$STERN_URL")" || true
+      tar -xzf /tmp/stern.tar.gz -C /tmp stern
+      sudo mv /tmp/stern /usr/local/bin/
+      rm -f /tmp/stern.tar.gz
+      echo "  + stern installed"
+    fi
+
+    echo ">>> Installing GitHub CLI (gh)"
+    if ! command -v gh &>/dev/null; then
+      curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+      sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+      sudo apt-get update -qq
+      sudo apt-get install -y gh 2>&1 | tail -3
+      echo "  + gh: $(gh --version | head -1)"
+    fi
+
+    echo ">>> Installing Gradle"
+    if ! command -v gradle &>/dev/null; then
+      GRADLE_VERSION="8.11.1"
+      curl -sL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+      sudo unzip -q /tmp/gradle.zip -d /opt/
+      sudo ln -sf "/opt/gradle-${GRADLE_VERSION}/bin/gradle" /usr/local/bin/gradle
+      rm -f /tmp/gradle.zip
+      echo "  + Gradle: $(gradle --version | head -1)"
+    fi
+
+    echo ">>> Installing Terraform"
+    if ! command -v terraform &>/dev/null; then
+      wget -qO- https://apt.releases.hashicorp.com/gpg | gpg --dearmor | sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg > /dev/null
+      echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+      sudo apt-get update -qq
+      sudo apt-get install -y terraform 2>&1 | tail -3
+      echo "  + Terraform: $(terraform version | head -1)"
+    fi
+
+    echo "  + Additional tools installed: stern, gh, gradle, terraform"
+  SHELL
+
+  # --- Stage 7b: Additional development tools ---
+  config.vm.provision "shell", name: "additional-dev-tools", inline: <<-'SHELL'
+    set -euo pipefail
+    echo ">>> Installing additional development utilities"
+
+    echo ">>> Installing yarn (alternative Node.js package manager)"
+    if ! command -v yarn &>/dev/null; then
+      sudo npm install -g yarn 2>&1 | tail -2
+      echo "  + Yarn: $(yarn --version)"
+    fi
+
+    echo ">>> Installing pnpm (fast Node.js package manager)"
+    if ! command -v pnpm &>/dev/null; then
+      sudo npm install -g pnpm 2>&1 | tail -2
+      echo "  + pnpm: $(pnpm --version)"
+    fi
+
+    echo "  + Development tools configuration complete"
+  SHELL
+
+  # --- Stage 7c: Moctra-specific tools ---
+  config.vm.provision "shell", name: "moctra-tools", inline: <<-'SHELL'
+    set -euo pipefail
+    echo ">>> Installing Moctra-specific development tools"
+
+    # Helper: authenticated GitHub API calls
+    gh_api() {
+      local url="$1"
+      local args=(-s)
+      if [ -n "${GITHUB_TOKEN:-}" ]; then
+        args+=(-H "Authorization: token $GITHUB_TOKEN")
+      fi
+      curl "${args[@]}" "$url"
+    }
+
+    echo ">>> Installing MongoDB Shell (mongosh)"
+    if ! command -v mongosh &>/dev/null; then
+      wget -qO- https://www.mongodb.org/static/pgp/server-7.0.asc | sudo gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg
+      echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+      sudo apt-get update -qq
+      sudo apt-get install -y mongodb-mongosh 2>&1 | tail -3
+      echo "  + mongosh: $(mongosh --version | head -1)"
+    fi
+
+    echo ">>> Installing Apache Kafka CLI tools"
+    if ! command -v kafka-topics.sh &>/dev/null; then
+      KAFKA_VERSION="3.7.0"
+      KAFKA_SCALA_VERSION="2.13"
+      curl -sL -o /tmp/kafka.tgz "https://archive.apache.org/dist/kafka/${KAFKA_VERSION}/kafka_${KAFKA_SCALA_VERSION}-${KAFKA_VERSION}.tgz"
+      sudo tar -xzf /tmp/kafka.tgz -C /opt/
+      sudo ln -sf "/opt/kafka_${KAFKA_SCALA_VERSION}-${KAFKA_VERSION}" /opt/kafka
+      # Add kafka bin to PATH for all users
+      echo 'export PATH=/opt/kafka/bin:$PATH' | sudo tee /etc/profile.d/kafka.sh > /dev/null
+      rm -f /tmp/kafka.tgz
+      echo "  + Kafka CLI: ${KAFKA_VERSION}"
+    fi
+
+    echo ">>> Installing MinIO Client (mc)"
+    if ! command -v mc &>/dev/null; then
+      curl -sL -o /tmp/mc https://dl.min.io/client/mc/release/linux-amd64/mc
+      sudo install -m 755 /tmp/mc /usr/local/bin/mc
+      rm -f /tmp/mc
+      echo "  + MinIO Client: $(mc --version | head -1)"
+    fi
+
+    echo ">>> Installing kcat (Kafka CLI tool, formerly kafkacat)"
+    if ! command -v kcat &>/dev/null; then
+      sudo apt-get install -y --no-install-recommends kcat 2>&1 | tail -3
+      echo "  + kcat: $(kcat -V 2>&1 | head -1)"
+    fi
+
+    echo ">>> Installing dive (Docker image layer explorer)"
+    if ! command -v dive &>/dev/null; then
+      DIVE_VERSION="0.12.0"
+      curl -sL -o /tmp/dive.deb "https://github.com/wagoodman/dive/releases/download/v${DIVE_VERSION}/dive_${DIVE_VERSION}_linux_amd64.deb"
+      sudo dpkg -i /tmp/dive.deb 2>&1 | tail -3
+      rm -f /tmp/dive.deb
+      echo "  + dive: $(dive --version 2>&1 | head -1)"
+    fi
+
+    echo ">>> Installing ctop (container metrics viewer)"
+    if ! command -v ctop &>/dev/null; then
+      sudo wget -q https://github.com/bcicen/ctop/releases/latest/download/ctop-0.7.7-linux-amd64 -O /usr/local/bin/ctop
+      sudo chmod +x /usr/local/bin/ctop
+      echo "  + ctop: $(ctop -v 2>&1)"
+    fi
+
+    echo "  + Moctra-specific tools installed: mongosh, kafka-cli, mc, kcat, dive, ctop"
   SHELL
 
   # --- Stage 8: User environment ---
@@ -1520,7 +1778,9 @@ OVERRIDE
 # == Dev VM environment ==
 export KUBECONFIG=/home/vagrant/.kube/config
 export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))
-export PATH=$JAVA_HOME/bin:$PATH
+export MAVEN_HOME=/usr/share/maven
+export M2_HOME=$MAVEN_HOME
+export PATH=$JAVA_HOME/bin:$MAVEN_HOME/bin:$PATH
 
 # Aliases
 alias k='kubectl'
@@ -1583,14 +1843,24 @@ BASHRC_BLOCK
     echo "======================================================"
     echo "           Dev VM - Installation Summary"
     echo "======================================================"
-    printf "  %-12s %s\n" "Docker:"  "$(docker --version 2>/dev/null || echo 'NOT FOUND')"
-    printf "  %-12s %s\n" "k3s:"     "$(k3s --version 2>/dev/null | head -1 || echo 'NOT FOUND')"
-    printf "  %-12s %s\n" "kubectl:" "$(kubectl version --client 2>/dev/null | head -1 || echo 'NOT FOUND')"
-    printf "  %-12s %s\n" "Helm:"    "$(helm version --short 2>/dev/null || echo 'NOT FOUND')"
-    printf "  %-12s %s\n" "Java:"    "$(java -version 2>&1 | head -1 || echo 'NOT FOUND')"
-    printf "  %-12s %s\n" "Node:"    "$(node -v 2>/dev/null || echo 'NOT FOUND')"
-    printf "  %-12s %s\n" "k9s:"     "$(k9s version --short 2>/dev/null || echo 'installed')"
-    printf "  %-12s %s\n" "yq:"      "$(yq --version 2>/dev/null || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "Docker:"     "$(docker --version 2>/dev/null || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "k3s:"        "$(k3s --version 2>/dev/null | head -1 || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "kubectl:"    "$(kubectl version --client 2>/dev/null | head -1 || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "Helm:"       "$(helm version --short 2>/dev/null || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "Java:"       "$(java -version 2>&1 | head -1 || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "Maven:"      "$(mvn --version 2>&1 | head -1 || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "Gradle:"     "$(gradle --version 2>&1 | head -1 || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "Node:"       "$(node -v 2>/dev/null || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "Yarn:"       "$(yarn --version 2>/dev/null || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "pnpm:"       "$(pnpm --version 2>/dev/null || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "k9s:"        "$(k9s version --short 2>/dev/null || echo 'installed')"
+    printf "  %-15s %s\n" "yq:"         "$(yq --version 2>/dev/null || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "PostgreSQL:"  "$(psql --version 2>/dev/null || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "Redis:"      "$(redis-cli --version 2>/dev/null || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "MongoDB:"    "$(mongosh --version 2>/dev/null | head -1 || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "Kafka CLI:"  "$([[ -f /opt/kafka/bin/kafka-topics.sh ]] && echo '3.7.0' || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "MinIO mc:"   "$(mc --version 2>/dev/null | head -1 || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "kcat:"       "$(kcat -V 2>&1 | head -1 || echo 'NOT FOUND')"
     echo "------------------------------------------------------"
     export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
     echo "  Cluster nodes:"
@@ -1799,12 +2069,22 @@ Write-Host "  Kubeconfig (host):      $kubeconfigDest" -ForegroundColor Cyan
 Write-Host "  Snapshot:               fresh-install (vagrant snapshot restore fresh-install)" -ForegroundColor Cyan
 Write-Host "  Setup log:              $LogFile" -ForegroundColor Cyan
 Write-Host ''
+Write-Host '  Host environment variables set:' -ForegroundColor Cyan
+if ($env:JAVA_HOME) {
+    Write-Host "    JAVA_HOME  = $env:JAVA_HOME" -ForegroundColor White
+}
+if ($env:MAVEN_HOME) {
+    Write-Host "    MAVEN_HOME = $env:MAVEN_HOME" -ForegroundColor White
+}
+Write-Host ''
 Write-Host '  Use from your host terminal:' -ForegroundColor Cyan
 Write-Host "    `$env:KUBECONFIG = `"$kubeconfigDest`"" -ForegroundColor White
 Write-Host "    `$env:DOCKER_HOST = `"tcp://${PrivateIP}:2375`"" -ForegroundColor White
 Write-Host '    kubectl get nodes' -ForegroundColor White
 Write-Host '    helm install <name> <chart>' -ForegroundColor White
 Write-Host '    docker ps' -ForegroundColor White
+Write-Host '    mvn --version' -ForegroundColor White
+Write-Host '    java -version' -ForegroundColor White
 Write-Host ''
 Write-Host '  Quick commands inside the VM:' -ForegroundColor Cyan
 Write-Host '    k get pods -A        (kubectl alias)' -ForegroundColor White

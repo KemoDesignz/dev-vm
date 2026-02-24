@@ -1,6 +1,6 @@
-# Dev VM — Ubuntu 24.04 LTS with Docker, k3s, Helm, Java 21, Node.js, and CLI Tools
+# Dev VM — Ubuntu 24.04 LTS Full-Stack Development Environment
 
-Fully automated, one-command setup for a **headless Ubuntu 24.04 LTS development VM** inside VirtualBox on **Windows or macOS**. The VM comes pre-installed with **Docker, k3s (lightweight Kubernetes), Helm, Java 21, Node.js LTS, k9s, kubectx/kubens, yq, and lazydocker**. Kubeconfig is automatically exported to the host.
+Fully automated, one-command setup for a **headless Ubuntu 24.04 LTS development VM** inside VirtualBox on **Windows or macOS**. The VM comes pre-installed with **Docker, k3s (lightweight Kubernetes), Helm, Java 21, Maven, Gradle, Node.js LTS, Python3, database clients (PostgreSQL, MySQL, Redis), GitHub CLI, Terraform, and essential CLI tools (k9s, stern, kubectx/kubens, yq, lazydocker)**. Kubeconfig is automatically exported to the host.
 
 ---
 
@@ -29,7 +29,7 @@ The shared workspace folder is created at `~/workspace` (your home directory) an
 - **Interactive menu** — Setup, Cleanup, Health Check, Update, or Re-provision from a single entry point
 - **Fully parameterised** — pass all options as flags for CI/scripted use (`-SkipConfirm`)
 - **Cross-platform** — works on Windows (winget) and macOS (Homebrew)
-- **Auto-installs host tools** — VirtualBox, Vagrant, Helm, and Docker CLI via winget or brew
+- **Auto-installs host tools** — VirtualBox, Vagrant, Helm, Docker CLI, Temurin JDK 21, and Maven via winget or brew
 - **Version pinning** — lock k3s and Node.js to specific versions (`-K3sVersion`, `-NodeVersion`)
 - **Health check** — one-command VM + cluster health report
 - **Software updates** — update all VM tools (system packages, k3s, CLI tools, npm)
@@ -46,18 +46,70 @@ The shared workspace folder is created at `~/workspace` (your home directory) an
 
 ### VM Tool Stack
 
+#### Core Development Tools
 | Tool | Description |
 |------|-------------|
 | Docker CE | Container engine with Compose and Buildx plugins |
 | k3s | Lightweight Kubernetes (replaces KIND) |
 | Helm | Kubernetes package manager |
 | kubectl | Kubernetes CLI (ships with k3s) |
+
+#### Languages & Build Tools
+| Tool | Description |
+|------|-------------|
 | Java 21 | OpenJDK headless |
+| Maven | Java build tool and dependency manager |
+| Gradle 8.11.1 | Alternative Java build tool |
 | Node.js LTS | JavaScript runtime + npm |
+| Yarn | Alternative Node.js package manager |
+| pnpm | Fast Node.js package manager |
+| Python3 | Python 3 with pip and venv |
+
+#### Database Clients
+| Tool | Description |
+|------|-------------|
+| psql | PostgreSQL client |
+| mysql | MySQL/MariaDB client |
+| redis-cli | Redis command-line client |
+| mongosh | MongoDB Shell (modern shell for MongoDB) |
+
+#### Infrastructure & DevOps
+| Tool | Description |
+|------|-------------|
+| Terraform | Infrastructure as Code tool |
+| GitHub CLI (gh) | GitHub command-line interface |
+
+#### CLI & Monitoring Tools
+| Tool | Description |
+|------|-------------|
 | k9s | Kubernetes terminal UI |
+| stern | Multi-pod log tailing for Kubernetes |
 | kubectx / kubens | Fast context & namespace switching |
 | yq | YAML processor |
 | lazydocker | Docker terminal UI |
+| jq | JSON processor |
+| dive | Docker image layer explorer & analyzer |
+| ctop | Container metrics viewer |
+
+#### Message Queue & Streaming
+| Tool | Description |
+|------|-------------|
+| Kafka CLI Tools | Apache Kafka command-line utilities (kafka-topics, kafka-console-consumer, etc.) |
+| kcat (kafkacat) | Generic command-line tool for Kafka producer/consumer |
+
+#### Object Storage
+| Tool | Description |
+|------|-------------|
+| MinIO Client (mc) | S3-compatible object storage CLI |
+
+#### Network & Utility Tools
+| Tool | Description |
+|------|-------------|
+| netcat | TCP/UDP networking utility |
+| dig/nslookup | DNS query tools |
+| telnet | Network protocol client |
+| wget/curl | File download utilities |
+| zip/p7zip | Archive utilities |
 
 ---
 
@@ -75,7 +127,7 @@ The shared workspace folder is created at `~/workspace` (your home directory) an
 ### Both
 - Internet connection
 
-> VirtualBox and Vagrant are installed automatically if missing (via winget on Windows, Homebrew on macOS).
+> VirtualBox, Vagrant, Helm, Docker CLI, Temurin JDK 21, and Maven are installed automatically if missing (via winget on Windows, Homebrew on macOS).
 
 ---
 
@@ -197,6 +249,7 @@ docker version
 kubectl get nodes
 k9s
 java -version
+mvn --version
 node -v
 helm version --short
 ```
@@ -324,8 +377,8 @@ Use `-SkipConfirm` to skip all prompts.
 | `-Action` | Skip menu: `Setup`, `Cleanup`, `Health`, `Update`, `Provision`, `Repair` | (interactive) |
 | `-VMName` | VM name | `dev-vm` |
 | `-CPUs` | vCPU count (1-32) | `4` |
-| `-Memory` | RAM in MB (1024-65536) | `8192` |
-| `-DiskGB` | Root disk in GB (10-500) | `80` |
+| `-Memory` | RAM in MB (1024-65536) | `16384` |
+| `-DiskGB` | Root disk in GB (10-500) | `120` (updated for Moctra) |
 | `-PrivateIP` | Host-only network IP | `192.168.56.10` |
 | `-GitHubToken` | GitHub PAT (injected into VM, used for API calls) | (optional) |
 | `-DockerHubToken` | Docker Hub token | (optional) |
@@ -344,9 +397,29 @@ Configured in `vagrant/defaults.yaml`. Override with `vagrant/env.yaml`.
 | 6443 | 6443 | k3s API |
 | 2375 | — | Docker API (via private network IP, always on) |
 | 8080 | 8080 | App server |
-| 3000 | 3000 | Dev server |
+| 3000 | 3000 | Dev server (React/Next.js) |
+| 3001 | 3001 | Additional dev server |
+| 4200 | 4200 | Angular dev server |
+| 5173 | 5173 | Vite dev server |
 | 30000 | 30000 | NodePort |
 | 443 | 8443 | Ingress HTTPS |
+| 5432 | 5432 | PostgreSQL |
+| 3306 | 3306 | MySQL/MariaDB |
+| 6379 | 6379 | Redis |
+| 27017 | 27017 | MongoDB |
+| 9092 | 9092 | Kafka |
+| 5672 | 5672 | RabbitMQ |
+| 9200 | 9200 | Elasticsearch |
+| 9090 | 9090 | Prometheus |
+| 4000 | 4000 | Moctra Frontend (React + BFF) |
+| 8180 | 8180 | Keycloak (IAM) |
+| 9000 | 9000 | MinIO S3 API |
+| 9001 | 9001 | MinIO Console UI |
+| 7880 | 7880 | LiveKit HTTP API |
+| 16686 | 16686 | Jaeger UI (Distributed Tracing) |
+| 3100 | 3100 | Grafana (Dashboards) |
+| 8025 | 8025 | MailHog UI (Dev Email) |
+| 8090 | 8090 | Kafka UI |
 
 ---
 
