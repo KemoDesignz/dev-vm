@@ -1,6 +1,6 @@
 # Dev VM — Ubuntu 24.04 LTS Full-Stack Development Environment
 
-Fully automated, one-command setup for a **headless Ubuntu 24.04 LTS development VM** inside VirtualBox on **Windows or macOS**. The VM comes pre-installed with **Docker, k3s (lightweight Kubernetes), Helm, Java 21, Maven, Gradle, Node.js LTS, Python3, database clients (PostgreSQL, MySQL, Redis), GitHub CLI, Terraform, and essential CLI tools (k9s, stern, kubectx/kubens, yq, lazydocker)**. Kubeconfig is automatically exported to the host.
+Fully automated, one-command setup for a **headless Ubuntu 24.04 LTS development VM** inside VirtualBox on **Windows or macOS**. The VM comes pre-installed with **Docker, k3s (lightweight Kubernetes), Helm, Java 21, Maven, Node.js LTS, Python3, database clients (PostgreSQL, MySQL, Redis, MongoDB), Message Queue tools (Kafka CLI, kcat), Object Storage (MinIO client), GitHub CLI, Terraform, and essential CLI tools (k9s, stern, kubectx/kubens, yq, lazydocker, dive, ctop)**. Kubeconfig is automatically exported to the host.
 
 ---
 
@@ -59,7 +59,6 @@ The shared workspace folder is created at `~/workspace` (your home directory) an
 |------|-------------|
 | Java 21 | OpenJDK headless |
 | Maven | Java build tool and dependency manager |
-| Gradle 8.11.1 | Alternative Java build tool |
 | Node.js LTS | JavaScript runtime + npm |
 | Yarn | Alternative Node.js package manager |
 | pnpm | Fast Node.js package manager |

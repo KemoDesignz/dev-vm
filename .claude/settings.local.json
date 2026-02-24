@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/kevin/workspace/repos/Moctra/js/**)",
+      "Read(//c/Users/kevin/workspace/repos/Moctra/infrastructure/**)",
+      "Read(//c/Users/kevin/workspace/repos/Moctra/java/gateway/**)",
+      "Bash(cat \"c:\\Users\\kevin\\repos\\dev-vm\\vagrant\\defaults.yaml\")",
+      "Bash(cat -A)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

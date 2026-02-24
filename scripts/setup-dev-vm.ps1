@@ -419,7 +419,7 @@ kubectl get nodes 2>/dev/null | grep -q ' Ready' && echo "READY" || echo "NOT_RE
     $script:toolsToRepair = $null
     $toolCheckOutput = (vagrant ssh -c @'
 MISSING=""
-for tool in docker k3s kubectl helm java node npm k9s yq lazydocker kubectx kubens stern gh gradle terraform python3 psql mysql redis-cli yarn pnpm; do
+for tool in docker k3s kubectl helm java node npm k9s yq lazydocker kubectx kubens stern gh terraform python3 psql mysql redis-cli yarn pnpm mongosh kcat mc; do
     if ! command -v "$tool" &>/dev/null; then
         MISSING="$MISSING $tool"
     fi
@@ -1649,16 +1649,6 @@ OVERRIDE
       echo "  + gh: $(gh --version | head -1)"
     fi
 
-    echo ">>> Installing Gradle"
-    if ! command -v gradle &>/dev/null; then
-      GRADLE_VERSION="8.11.1"
-      curl -sL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
-      sudo unzip -q /tmp/gradle.zip -d /opt/
-      sudo ln -sf "/opt/gradle-${GRADLE_VERSION}/bin/gradle" /usr/local/bin/gradle
-      rm -f /tmp/gradle.zip
-      echo "  + Gradle: $(gradle --version | head -1)"
-    fi
-
     echo ">>> Installing Terraform"
     if ! command -v terraform &>/dev/null; then
       wget -qO- https://apt.releases.hashicorp.com/gpg | gpg --dearmor | sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg > /dev/null
@@ -1668,7 +1658,7 @@ OVERRIDE
       echo "  + Terraform: $(terraform version | head -1)"
     fi
 
-    echo "  + Additional tools installed: stern, gh, gradle, terraform"
+    echo "  + Additional tools installed: stern, gh, terraform"
   SHELL
 
   # --- Stage 7b: Additional development tools ---
@@ -1849,13 +1839,12 @@ BASHRC_BLOCK
     printf "  %-15s %s\n" "Helm:"       "$(helm version --short 2>/dev/null || echo 'NOT FOUND')"
     printf "  %-15s %s\n" "Java:"       "$(java -version 2>&1 | head -1 || echo 'NOT FOUND')"
     printf "  %-15s %s\n" "Maven:"      "$(mvn --version 2>&1 | head -1 || echo 'NOT FOUND')"
-    printf "  %-15s %s\n" "Gradle:"     "$(gradle --version 2>&1 | head -1 || echo 'NOT FOUND')"
     printf "  %-15s %s\n" "Node:"       "$(node -v 2>/dev/null || echo 'NOT FOUND')"
     printf "  %-15s %s\n" "Yarn:"       "$(yarn --version 2>/dev/null || echo 'NOT FOUND')"
     printf "  %-15s %s\n" "pnpm:"       "$(pnpm --version 2>/dev/null || echo 'NOT FOUND')"
     printf "  %-15s %s\n" "k9s:"        "$(k9s version --short 2>/dev/null || echo 'installed')"
     printf "  %-15s %s\n" "yq:"         "$(yq --version 2>/dev/null || echo 'NOT FOUND')"
-    printf "  %-15s %s\n" "PostgreSQL:"  "$(psql --version 2>/dev/null || echo 'NOT FOUND')"
+    printf "  %-15s %s\n" "PostgreSQL:" "$(psql --version 2>/dev/null || echo 'NOT FOUND')"
     printf "  %-15s %s\n" "Redis:"      "$(redis-cli --version 2>/dev/null || echo 'NOT FOUND')"
     printf "  %-15s %s\n" "MongoDB:"    "$(mongosh --version 2>/dev/null | head -1 || echo 'NOT FOUND')"
     printf "  %-15s %s\n" "Kafka CLI:"  "$([[ -f /opt/kafka/bin/kafka-topics.sh ]] && echo '3.7.0' || echo 'NOT FOUND')"

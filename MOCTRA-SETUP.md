@@ -76,7 +76,6 @@ ports:
 The health check now verifies all new tools:
 
 ```bash
-✓ Gradle
 ✓ Yarn
 ✓ pnpm
 ✓ PostgreSQL (psql)
@@ -496,7 +495,7 @@ vagrant destroy -f
 
 | Moctra Component | Required Tools | Status |
 |------------------|---------------|--------|
-| **Java Microservices** | Java 21, Maven, Gradle, Docker | ✅ |
+| **Java Microservices** | Java 21, Maven, Docker | ✅ |
 | **Frontend** | Node.js, npm, Yarn, pnpm | ✅ |
 | **PostgreSQL** | psql client | ✅ |
 | **MongoDB** | mongosh | ✅ |
