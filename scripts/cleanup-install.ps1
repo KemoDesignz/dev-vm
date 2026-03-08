@@ -268,6 +268,8 @@ if ($IsWin) {
             @{ Id = 'Helm.Helm';           Label = 'Helm' }
             @{ Id = 'Docker.DockerCLI';    Label = 'Docker CLI' }
             @{ Id = 'Derailed.k9s';        Label = 'k9s' }
+            @{ Id = 'EclipseAdoptium.Temurin.21.JDK'; Label = 'Temurin JDK 21' }
+            @{ Id = 'Apache.Maven';        Label = 'Maven' }
         )
 
         foreach ($tool in $wingetTools) {
@@ -296,6 +298,7 @@ if ($IsWin) {
         $brewCasks = @(
             @{ Name = 'vagrant';    Label = 'Vagrant' }
             @{ Name = 'virtualbox'; Label = 'VirtualBox' }
+            @{ Name = 'temurin@21'; Label = 'Temurin JDK 21' }
         )
         $installedCasks = brew list --cask 2>$null
 
@@ -333,6 +336,23 @@ if ($IsWin) {
                 Write-Ok "$($formula.Label) not found via Homebrew."
             }
         }
+    }
+}
+
+# ─────────────────────────────────────────────────────────────
+# Direct-installed Maven (macOS /opt/maven)
+# ─────────────────────────────────────────────────────────────
+if (-not $IsWin) {
+    $mvnDir = '/opt/maven'
+    if (Test-Path $mvnDir) {
+        if (Confirm-Step 'Remove Maven (/opt/maven)?') {
+            $result = Invoke-Uninstall -Label 'Maven' -Command { sudo rm -rf /opt/maven }
+            if ($result) { $removedSomething = $true }
+        } else {
+            Write-Warn 'Kept: Maven'
+        }
+    } else {
+        Write-Ok 'Maven (/opt/maven) not found.'
     }
 }
 

@@ -1204,14 +1204,25 @@ if (Get-Command docker -ErrorAction SilentlyContinue) {
 # 3d. Install Temurin JDK 21 on host (if missing)
 # ─────────────────────────────────────────────────────────────
 Write-Step 'Checking Temurin JDK 21 (host)'
-$javaCmd = Get-Command java -ErrorAction SilentlyContinue
 $hasTemurin21 = $false
-if ($javaCmd) {
-    $javaVerOutput = & java -version 2>&1 | Out-String
-    if ($javaVerOutput -match '21\.' -and $javaVerOutput -match 'Temurin') {
+
+if ($IsWin) {
+    $javaCmd = Get-Command java -ErrorAction SilentlyContinue
+    if ($javaCmd) {
+        $javaVerOutput = & java -version 2>&1 | Out-String
+        if ($javaVerOutput -match '21\.' -and $javaVerOutput -match 'Temurin') {
+            $hasTemurin21 = $true
+        }
+    }
+} else {
+    # macOS: Temurin cask installs here but does NOT add java to PATH.
+    # Check the known install location directly instead of relying on Get-Command.
+    $temurinHome = '/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home'
+    if (Test-Path "$temurinHome/bin/java") {
         $hasTemurin21 = $true
     }
 }
+
 if (-not $hasTemurin21) {
     if ($IsWin) {
         Write-Warn 'Temurin JDK 21 not found - installing via winget...'
@@ -1219,17 +1230,17 @@ if (-not $hasTemurin21) {
             --accept-package-agreements --accept-source-agreements
     } else {
         Write-Warn 'Temurin JDK 21 not found - installing via Homebrew...'
+        brew tap adoptium/openjdk 2>/dev/null
         brew install --cask temurin@21
     }
     Refresh-Path
 }
 
 # Set JAVA_HOME on the host
-if (Get-Command java -ErrorAction SilentlyContinue) {
-    $javaVer = & java -version 2>&1 | Select-Object -First 1
-    Write-Ok "Java: $javaVer"
-
-    if ($IsWin) {
+if ($IsWin) {
+    if (Get-Command java -ErrorAction SilentlyContinue) {
+        $javaVer = & java -version 2>&1 | Select-Object -First 1
+        Write-Ok "Java: $javaVer"
         # Resolve JAVA_HOME from the java.exe path (e.g. C:\Program Files\Eclipse Adoptium\jdk-21...\bin\java.exe -> parent\parent)
         $javaExe = (Get-Command java).Source
         $javaHome = Split-Path (Split-Path $javaExe -Parent) -Parent
@@ -1243,18 +1254,20 @@ if (Get-Command java -ErrorAction SilentlyContinue) {
             Write-Ok "JAVA_HOME already set: $javaHome"
         }
     } else {
-        # macOS: resolve symlinks to get the real JDK path
-        $javaExe = & readlink -f (Get-Command java).Source 2>/dev/null
-        if (-not $javaExe) { $javaExe = (Get-Command java).Source }
-        $javaHome = Split-Path (Split-Path $javaExe -Parent) -Parent
-        $env:JAVA_HOME = $javaHome
-        Write-Ok "JAVA_HOME set to $javaHome (current session)"
+        Write-Warn 'Java not found after install attempt.'
+        Write-Warn 'Install manually: winget install EclipseAdoptium.Temurin.21.JDK'
     }
 } else {
-    Write-Warn 'Java not found after install attempt.'
-    if ($IsWin) {
-        Write-Warn 'Install manually: winget install EclipseAdoptium.Temurin.21.JDK'
+    # macOS: use the known Temurin cask install path directly
+    $temurinHome = '/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home'
+    if (Test-Path "$temurinHome/bin/java") {
+        $env:JAVA_HOME = $temurinHome
+        $env:PATH = "${temurinHome}/bin:$env:PATH"
+        $javaVer = & "$temurinHome/bin/java" -version 2>&1 | Select-Object -First 1
+        Write-Ok "Java: $javaVer"
+        Write-Ok "JAVA_HOME set to $temurinHome (current session)"
     } else {
+        Write-Warn 'Java not found after install attempt.'
         Write-Warn 'Install manually: brew install --cask temurin@21'
     }
 }
@@ -1269,8 +1282,18 @@ if (-not (Get-Command mvn -ErrorAction SilentlyContinue)) {
         winget install --id Apache.Maven --source winget `
             --accept-package-agreements --accept-source-agreements
     } else {
-        Write-Warn 'Maven not found - installing via Homebrew...'
-        brew install maven
+        # Install Maven directly from Apache to avoid Homebrew pulling in openjdk (conflicts with Temurin)
+        $mvnVersion = '3.9.9'
+        $mvnTar = "apache-maven-${mvnVersion}-bin.tar.gz"
+        $mvnUrl = "https://dlcdn.apache.org/maven/maven-3/${mvnVersion}/binaries/${mvnTar}"
+        $mvnInstallDir = '/opt/maven'
+        Write-Warn "Installing Maven $mvnVersion from Apache..."
+        & /usr/bin/curl -fsSL -o "/tmp/$mvnTar" $mvnUrl
+        & sudo mkdir -p $mvnInstallDir
+        & sudo tar -xzf "/tmp/$mvnTar" -C $mvnInstallDir --strip-components=1
+        Remove-Item -Force "/tmp/$mvnTar" -ErrorAction SilentlyContinue
+        # Add mvn to PATH for current session
+        $env:PATH = "${mvnInstallDir}/bin:$env:PATH"
     }
     Refresh-Path
 }
@@ -1295,8 +1318,11 @@ if (Get-Command mvn -ErrorAction SilentlyContinue) {
             Write-Ok "MAVEN_HOME already set: $mavenHome"
         }
     } else {
-        # macOS: resolve from mvn binary
+        # macOS: resolve from mvn binary (BSD readlink lacks -f, use python fallback)
         $mvnExe = & readlink -f (Get-Command mvn).Source 2>/dev/null
+        if (-not $mvnExe) {
+            $mvnExe = & python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" (Get-Command mvn).Source 2>/dev/null
+        }
         if (-not $mvnExe) { $mvnExe = (Get-Command mvn).Source }
         $mavenHome = Split-Path (Split-Path $mvnExe -Parent) -Parent
         $env:MAVEN_HOME = $mavenHome
@@ -1308,7 +1334,7 @@ if (Get-Command mvn -ErrorAction SilentlyContinue) {
     if ($IsWin) {
         Write-Warn 'Install manually: winget install Apache.Maven'
     } else {
-        Write-Warn 'Install manually: brew install maven'
+        Write-Warn 'Install manually: Download from https://maven.apache.org/download.cgi'
     }
 }
 
