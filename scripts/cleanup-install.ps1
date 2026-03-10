@@ -115,12 +115,65 @@ if (-not $SkipConfirm) {
 $removedSomething = $false
 
 # ─────────────────────────────────────────────────────────────
-# 1. Remove VM snapshots & destroy the VM
+# 1. Kill & destroy the VM
 # ─────────────────────────────────────────────────────────────
-Write-Step 'Vagrant VM'
+Write-Step 'Virtual Machine'
 
-if (Test-Path (Join-Path $VagrantDir 'Vagrantfile')) {
-    # Check if vagrant is available
+$vmDestroyed = $false
+
+# First, try to force-stop and unregister the VM via VirtualBox directly.
+# This works even when Vagrant state is corrupt or Vagrantfile is missing.
+if (Get-Command VBoxManage -ErrorAction SilentlyContinue) {
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    $vboxVMs = VBoxManage list vms 2>$null
+    $ErrorActionPreference = $prevEAP
+
+    # Match the VM by name (quoted in VBoxManage output, e.g. "dev-vm" {uuid})
+    $vmEntry = $vboxVMs | Select-String -Pattern "^`"$VMName`"\s" | Select-Object -First 1
+    if ($vmEntry) {
+        Write-Warn "Found VirtualBox VM: $VMName"
+
+        # Check if running
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        $runningVMs = VBoxManage list runningvms 2>$null
+        $ErrorActionPreference = $prevEAP
+        $isRunning = $runningVMs | Select-String -Pattern "^`"$VMName`"\s" -Quiet
+
+        if ($isRunning) {
+            Write-Warn "VM is running."
+            if (Confirm-Step "Force power off the VM ($VMName)?") {
+                $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+                VBoxManage controlvm $VMName poweroff 2>&1 | ForEach-Object { Write-Host "    $_" }
+                $ErrorActionPreference = $prevEAP
+                Start-Sleep -Seconds 2
+                Write-Ok 'VM powered off.'
+            } else {
+                Write-Warn 'Skipped power off.'
+            }
+        }
+
+        if (Confirm-Step "Destroy the VM and delete all its files ($VMName)?") {
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            VBoxManage unregistervm $VMName --delete 2>&1 | ForEach-Object { Write-Host "    $_" }
+            $vboxExit = $LASTEXITCODE
+            $ErrorActionPreference = $prevEAP
+            if ($vboxExit -eq 0) {
+                Write-Ok 'VM destroyed via VirtualBox.'
+                $vmDestroyed = $true
+                $removedSomething = $true
+            } else {
+                Write-Err "VBoxManage unregistervm failed (exit $vboxExit). Falling back to vagrant destroy."
+            }
+        } else {
+            Write-Warn 'Skipped VM destruction.'
+        }
+    } else {
+        Write-Ok "No VirtualBox VM named '$VMName' found."
+    }
+}
+
+# Fallback: use vagrant destroy if VBoxManage didn't handle it
+if (-not $vmDestroyed -and (Test-Path (Join-Path $VagrantDir 'Vagrantfile'))) {
     if (Get-Command vagrant -ErrorAction SilentlyContinue) {
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         $status = vagrant status --machine-readable 2>$null |
@@ -136,7 +189,6 @@ if (Test-Path (Join-Path $VagrantDir 'Vagrantfile')) {
             $ErrorActionPreference = $prevEAP
 
             if ($snapshotExit -eq 0 -and $rawSnapshots -and $rawSnapshots -notmatch 'No snapshots') {
-                # Filter to non-empty trimmed lines (skip any vagrant output noise)
                 $snapNames = @($rawSnapshots | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^==>|^$' })
                 if ($snapNames.Count -gt 0) {
                     Write-Warn "Snapshots found:"
@@ -171,13 +223,11 @@ if (Test-Path (Join-Path $VagrantDir 'Vagrantfile')) {
                 Write-Warn 'Skipped VM destruction.'
             }
         } else {
-            Write-Ok 'No running VM found (state: not_created).'
+            Write-Ok 'No Vagrant VM found (state: not_created).'
         }
     } else {
-        Write-Warn 'Vagrant is not installed. Cannot destroy VM — remove it manually via VirtualBox if needed.'
+        Write-Warn 'Vagrant is not installed. Cannot destroy VM.'
     }
-} else {
-    Write-Ok 'No Vagrantfile found. Nothing to destroy.'
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -344,7 +394,8 @@ if ($IsWin) {
 # ─────────────────────────────────────────────────────────────
 if (-not $IsWin) {
     $mvnDir = '/opt/maven'
-    if (Test-Path $mvnDir) {
+    # Only treat as Maven if it contains the expected bin/mvn binary
+    if ((Test-Path $mvnDir) -and (Test-Path (Join-Path $mvnDir 'bin/mvn'))) {
         if (Confirm-Step 'Remove Maven (/opt/maven)?') {
             $result = Invoke-Uninstall -Label 'Maven' -Command { sudo rm -rf /opt/maven }
             if ($result) { $removedSomething = $true }

@@ -1109,14 +1109,27 @@ Write-Ok "VirtualBox $(VBoxManage --version)"
 
 # Ensure a host-only network exists for the chosen IP range
 Write-Step 'Ensuring VirtualBox host-only network for private IP'
-$subnet  = ($PrivateIP -replace '\.\d+$', '')
+$subnet = ($PrivateIP -replace '\.\d+$', '')
+
+# VirtualBox 7+ on macOS uses hostonlynets instead of hostonlyifs
+$prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
 $hostNet = VBoxManage list hostonlyifs 2>$null |
            Select-String -Pattern "IPAddress:\s+$subnet\."
 if (-not $hostNet) {
+    # Also check host-only networks (VirtualBox 7+ / macOS)
+    $hostNet = VBoxManage list hostonlynets 2>$null |
+               Select-String -Pattern "NetworkMask:\s+$subnet\."
+}
+if (-not $hostNet) {
     Write-Warn 'Creating host-only network adapter...'
     if ($IsMac) { Write-Warn 'macOS may prompt you to allow the VirtualBox kernel extension in System Settings > Privacy & Security.' }
-    VBoxManage hostonlyif create 2>$null
+    # Try modern hostonlynets first, fall back to legacy hostonlyifs
+    VBoxManage hostonlynet add --name "HostNetwork" --netmask 255.255.255.0 --lower-ip "${subnet}.1" --upper-ip "${subnet}.254" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        VBoxManage hostonlyif create 2>$null
+    }
 }
+$ErrorActionPreference = $prevEAP
 
 # ─────────────────────────────────────────────────────────────
 # 3. Install Vagrant (if missing)
@@ -1215,12 +1228,20 @@ if ($IsWin) {
         }
     }
 } else {
-    # macOS: Temurin cask installs here but does NOT add java to PATH.
-    # Check the known install location directly instead of relying on Get-Command.
-    $temurinHome = '/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home'
-    if (Test-Path "$temurinHome/bin/java") {
-        $hasTemurin21 = $true
+    # macOS: Temurin cask installs to /Library/Java/JavaVirtualMachines/ but does NOT add java to PATH.
+    # Search for any temurin-21 JDK variant instead of hardcoding the exact directory name.
+    $temurinHome = $null
+    $jvmDir = '/Library/Java/JavaVirtualMachines'
+    if (Test-Path $jvmDir) {
+        $temurinDir = Get-ChildItem $jvmDir -Directory -ErrorAction SilentlyContinue |
+                      Where-Object { $_.Name -match 'temurin.*21' } |
+                      Select-Object -First 1
+        if ($temurinDir) {
+            $candidate = Join-Path $temurinDir.FullName 'Contents/Home'
+            if (Test-Path "$candidate/bin/java") { $temurinHome = $candidate }
+        }
     }
+    if ($temurinHome) { $hasTemurin21 = $true }
 }
 
 if (-not $hasTemurin21) {
@@ -1230,8 +1251,13 @@ if (-not $hasTemurin21) {
             --accept-package-agreements --accept-source-agreements
     } else {
         Write-Warn 'Temurin JDK 21 not found - installing via Homebrew...'
-        brew tap adoptium/openjdk 2>/dev/null
-        brew install --cask temurin@21
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        brew tap adoptium/openjdk 2>&1 | ForEach-Object { Write-Host "    $_" }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn 'brew tap adoptium/openjdk failed — trying install anyway...'
+        }
+        brew install --cask temurin@21 2>&1 | ForEach-Object { Write-Host "    $_" }
+        $ErrorActionPreference = $prevEAP
     }
     Refresh-Path
 }
@@ -1258,9 +1284,20 @@ if ($IsWin) {
         Write-Warn 'Install manually: winget install EclipseAdoptium.Temurin.21.JDK'
     }
 } else {
-    # macOS: use the known Temurin cask install path directly
-    $temurinHome = '/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home'
-    if (Test-Path "$temurinHome/bin/java") {
+    # macOS: discover the Temurin install path (may vary by version/formula)
+    if (-not $temurinHome) {
+        $jvmDir = '/Library/Java/JavaVirtualMachines'
+        if (Test-Path $jvmDir) {
+            $temurinDir = Get-ChildItem $jvmDir -Directory -ErrorAction SilentlyContinue |
+                          Where-Object { $_.Name -match 'temurin.*21' } |
+                          Select-Object -First 1
+            if ($temurinDir) {
+                $candidate = Join-Path $temurinDir.FullName 'Contents/Home'
+                if (Test-Path "$candidate/bin/java") { $temurinHome = $candidate }
+            }
+        }
+    }
+    if ($temurinHome -and (Test-Path "$temurinHome/bin/java")) {
         $env:JAVA_HOME = $temurinHome
         $env:PATH = "${temurinHome}/bin:$env:PATH"
         $javaVer = & "$temurinHome/bin/java" -version 2>&1 | Select-Object -First 1
@@ -1318,11 +1355,8 @@ if (Get-Command mvn -ErrorAction SilentlyContinue) {
             Write-Ok "MAVEN_HOME already set: $mavenHome"
         }
     } else {
-        # macOS: resolve from mvn binary (BSD readlink lacks -f, use python fallback)
-        $mvnExe = & readlink -f (Get-Command mvn).Source 2>/dev/null
-        if (-not $mvnExe) {
-            $mvnExe = & python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" (Get-Command mvn).Source 2>/dev/null
-        }
+        # macOS: resolve from mvn binary (BSD readlink lacks -f, use python3 to resolve symlinks)
+        $mvnExe = & python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" (Get-Command mvn).Source 2>/dev/null
         if (-not $mvnExe) { $mvnExe = (Get-Command mvn).Source }
         $mavenHome = Split-Path (Split-Path $mvnExe -Parent) -Parent
         $env:MAVEN_HOME = $mavenHome
