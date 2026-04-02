@@ -1,6 +1,322 @@
 # Dev VM — Ubuntu 24.04 LTS Full-Stack Development Environment
 
-Fully automated, one-command setup for a **headless Ubuntu 24.04 LTS development VM** inside VirtualBox on **Windows or macOS**. The VM comes pre-installed with **Docker, k3s (lightweight Kubernetes), Helm, Java 21, Maven, Node.js LTS, Python3, database clients (PostgreSQL, MySQL, Redis, MongoDB), Message Queue tools (Kafka CLI, kcat), Object Storage (MinIO client), GitHub CLI, Terraform, and essential CLI tools (k9s, stern, kubectx/kubens, yq, lazydocker, dive, ctop)**. Kubeconfig is automatically exported to the host.
+One-command setup for a **headless Ubuntu 24.04 LTS VM** on **Windows or macOS**. Runs inside VirtualBox, managed by Vagrant, with a full dev-tool stack pre-installed. Kubeconfig is automatically exported to the host so you can use `kubectl`, `helm`, and `docker` from your terminal without SSH.
+
+---
+
+## Installation
+
+### Step 1: Prerequisites
+
+#### Windows
+1. **Windows 10 or 11** with hardware virtualization enabled in BIOS (VT-x / AMD-V)
+2. **Hyper-V must be disabled** — VirtualBox cannot run alongside Hyper-V:
+   ```powershell
+   # Run as Administrator, then reboot
+   bcdedit /set hypervisorlaunchtype off
+   ```
+3. **PowerShell 5.1+** (pre-installed on Windows 10/11)
+
+#### macOS
+1. **macOS 12+** (Monterey or later)
+2. **Homebrew** — install if you don't have it:
+   ```bash
+   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+   ```
+3. **PowerShell Core** — required to run the setup script:
+   ```bash
+   brew install --cask powershell
+   ```
+
+> The script automatically installs VirtualBox, Vagrant, Helm, Docker CLI, Temurin JDK 21, and Maven via winget (Windows) or Homebrew (macOS). No manual installs needed beyond the prerequisites above.
+
+### Step 2: Clone and Run
+
+#### Windows
+
+```powershell
+# Allow script execution (one-time)
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Unrestricted
+
+# Clone and run
+git clone <repo-url>
+cd dev-vm
+.\scripts\setup-dev-vm.ps1
+```
+
+#### macOS
+
+```bash
+git clone <repo-url>
+cd dev-vm
+pwsh ./scripts/setup-dev-vm.ps1
+```
+
+### Step 3: Follow the Prompts
+
+The interactive menu will appear:
+
+```
+  1) Setup new Dev VM
+  2) Clean up / destroy Dev VM
+  3) Health check
+  4) Update VM software
+  5) Re-provision VM
+  6) Repair VM (diagnose & fix)
+```
+
+Select **1** to start setup. You'll be asked for:
+
+| Prompt | What to enter | Required? |
+|--------|--------------|-----------|
+| VM name | Name for the VirtualBox VM | No (default: `dev-vm`) |
+| CPUs | Number of vCPUs | No (default: `8`) |
+| Memory | RAM in MB | No (default: `16384`) |
+| Disk size | Root disk in GB | No (default: `120`) |
+| VM private IP | Host-only network IP | No (default: `192.168.56.10`) |
+| GitHub token | Personal access token for API calls | Optional but recommended |
+| Docker Hub user/token | For `docker login` inside VM | Optional |
+
+Press Enter to accept defaults. The full setup takes ~10-15 minutes depending on your internet speed.
+
+### Step 4: Verify
+
+After setup completes, connect to the VM and verify:
+
+```powershell
+# SSH into the VM
+cd vagrant
+vagrant ssh
+
+# Inside the VM — check the stack
+docker version
+kubectl get nodes
+java -version
+mvn --version
+node -v
+helm version --short
+k9s   # press Ctrl+C to exit
+```
+
+### Non-Interactive / CI Mode
+
+Skip all prompts with `-SkipConfirm` and pass settings as parameters:
+
+```powershell
+.\scripts\setup-dev-vm.ps1 -Action Setup -CPUs 4 -Memory 8192 -DiskGB 50 -SkipConfirm
+```
+
+---
+
+## Using the VM from Your Host
+
+The setup script installs `kubectl`, `helm`, and `docker` on your host and exports the kubeconfig automatically. Set these environment variables to use them:
+
+#### PowerShell (Windows or macOS)
+```powershell
+$env:KUBECONFIG = "$HOME/.kube/config-dev-vm"
+$env:DOCKER_HOST = "tcp://192.168.56.10:2375"
+
+kubectl get nodes
+helm install my-release my-chart
+docker ps
+```
+
+#### Bash / Zsh (macOS)
+```bash
+export KUBECONFIG="$HOME/.kube/config-dev-vm"
+export DOCKER_HOST="tcp://192.168.56.10:2375"
+
+kubectl get nodes
+helm install my-release my-chart
+docker ps
+```
+
+> **Tip:** Add these exports to your shell profile (`~/.bashrc`, `~/.zshrc`, or PowerShell `$PROFILE`) to make them permanent.
+
+---
+
+## Day-to-Day Management
+
+All management is done through the same script. Either use the interactive menu or pass `-Action`:
+
+| Action | Command | What it does |
+|--------|---------|-------------|
+| **Health check** | `.\scripts\setup-dev-vm.ps1 -Action Health` | Reports VM, service, disk, memory, and tool status |
+| **Update** | `.\scripts\setup-dev-vm.ps1 -Action Update` | Updates all VM software (apt, k3s, CLI tools, npm) |
+| **Repair** | `.\scripts\setup-dev-vm.ps1 -Action Repair` | Diagnoses and auto-fixes common issues |
+| **Re-provision** | `.\scripts\setup-dev-vm.ps1 -Action Provision` | Re-runs all provisioning stages |
+| **Cleanup** | `.\scripts\setup-dev-vm.ps1 -Action Cleanup` | Destroys VM and removes all generated files |
+
+### Snapshots
+
+A `fresh-install` snapshot is created automatically after setup. To restore:
+
+```powershell
+cd vagrant
+vagrant snapshot restore fresh-install
+```
+
+### Repair
+
+The repair engine handles common failure scenarios automatically:
+- Starts the VM if stopped or suspended
+- Restarts Docker or k3s if not active
+- Waits for the Kubernetes node to become Ready
+- Re-extracts the host kubeconfig if missing or broken
+- Reinstalls missing CLI tools (k9s, yq, lazydocker, kubectx, kubens)
+- Cleans disk space if usage exceeds 90%
+
+Repair also runs automatically after initial setup and after provisioning retries.
+
+---
+
+## Configuration
+
+Settings are driven by two YAML files in the `vagrant/` directory:
+
+| File | Purpose | Committed? |
+|------|---------|------------|
+| `vagrant/defaults.yaml` | Default VM settings and port forwards | Yes |
+| `vagrant/env.yaml` | Your personal overrides | No (gitignored) |
+
+### Precedence
+
+```
+CLI params (-CPUs 8)  >  env.yaml  >  defaults.yaml  >  interactive prompt
+```
+
+### Customizing with env.yaml
+
+Create `vagrant/env.yaml` to override any settings. Scalar values under `vm:` are merged per-key. The `ports` list is replaced entirely if present.
+
+```yaml
+# vagrant/env.yaml
+vm:
+  cpus: 8
+  memory: 16384
+
+# Override port forwards (replaces the entire list)
+ports:
+  - guest: 6443
+    host: 6443
+    description: k3s API
+  - guest: 8080
+    host: 8080
+  - guest: 3000
+    host: 3000
+  - guest: 5432
+    host: 5432
+    description: PostgreSQL
+
+# Store credentials locally (this file is gitignored)
+credentials:
+  github_token: ghp_xxxxxxxxxxxxxxxxxxxx
+  dockerhub_user: myuser
+  dockerhub_token: dckr_pat_xxxxxxxxxxxx
+```
+
+If you enter credentials interactively during setup, the script offers to save them to `env.yaml` automatically.
+
+---
+
+## VM Tool Stack
+
+### Core
+| Tool | Description |
+|------|-------------|
+| Docker CE | Container engine with Compose and Buildx plugins |
+| k3s | Lightweight Kubernetes |
+| Helm | Kubernetes package manager |
+| kubectl | Kubernetes CLI (ships with k3s) |
+
+### Languages & Build Tools
+| Tool | Description |
+|------|-------------|
+| Java 21 | OpenJDK headless |
+| Maven | Java build tool |
+| Node.js LTS | JavaScript runtime + npm |
+| Yarn / pnpm | Alternative Node.js package managers |
+| Python 3 | Python 3 with pip and venv |
+
+### Database & Messaging Clients
+| Tool | Description |
+|------|-------------|
+| psql | PostgreSQL client |
+| mysql | MySQL/MariaDB client |
+| redis-cli | Redis client |
+| Kafka CLI | Apache Kafka utilities (kafka-topics, kafka-console-consumer, etc.) |
+| kcat | Kafka producer/consumer CLI (formerly kafkacat) |
+| MinIO Client (mc) | S3-compatible object storage CLI |
+
+### Infrastructure & DevOps
+| Tool | Description |
+|------|-------------|
+| Terraform | Infrastructure as Code |
+| GitHub CLI (gh) | GitHub from the command line |
+
+### Monitoring & Debugging
+| Tool | Description |
+|------|-------------|
+| k9s | Kubernetes terminal UI |
+| stern | Multi-pod log tailing |
+| kubectx / kubens | Fast context & namespace switching |
+| lazydocker | Docker terminal UI |
+| dive | Docker image layer explorer |
+| ctop | Container metrics viewer |
+| yq / jq | YAML / JSON processors |
+
+---
+
+## Parameters Reference
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `-Action` | Skip menu: `Setup`, `Cleanup`, `Health`, `Update`, `Provision`, `Repair` | interactive |
+| `-VMName` | VM name | `dev-vm` |
+| `-CPUs` | vCPU count (1-32) | `8` |
+| `-Memory` | RAM in MB (1024-65536) | `16384` |
+| `-DiskGB` | Root disk in GB (10-500) | `120` |
+| `-PrivateIP` | Host-only network IP | `192.168.56.10` |
+| `-GitHubToken` | GitHub PAT (injected into VM, used for API calls) | optional |
+| `-DockerHubToken` | Docker Hub token | optional |
+| `-DockerHubUser` | Docker Hub username (enables `docker login`) | optional |
+| `-K3sVersion` | Pin k3s version (e.g. `v1.31.4+k3s1`) | latest |
+| `-NodeVersion` | Pin Node.js major version (e.g. `22`) | `lts` |
+| `-DryRun` | Generate Vagrantfile and exit | `false` |
+| `-SkipConfirm` | Skip all confirmation prompts | `false` |
+
+### Default Port Forwards
+
+Configured in `vagrant/defaults.yaml`. Override with `vagrant/env.yaml`.
+
+| Guest | Host | Purpose |
+|-------|------|---------|
+| 6443 | 6443 | k3s API |
+| 2375 | -- | Docker API (via private network IP, always on) |
+| 8080 | 8080 | App server |
+| 3000 | 3000 | Dev server |
+| 3001 | 3001 | Additional dev server |
+| 4200 | 4200 | Angular dev server |
+| 5173 | 5173 | Vite dev server |
+| 30000 | 30000 | NodePort |
+| 443 | 8443 | Ingress HTTPS |
+| 5432 | 5432 | PostgreSQL |
+| 3306 | 3306 | MySQL/MariaDB |
+| 6379 | 6379 | Redis |
+| 9092 | 9092 | Kafka |
+| 5672 | 5672 | RabbitMQ |
+| 9200 | 9200 | Elasticsearch |
+| 9090 | 9090 | Prometheus |
+| 4000 | 4000 | Moctra Frontend |
+| 8180 | 8180 | Keycloak |
+| 9000 | 9000 | MinIO S3 API |
+| 9001 | 9001 | MinIO Console |
+| 7880 | 7880 | LiveKit HTTP API |
+| 16686 | 16686 | Jaeger UI |
+| 3100 | 3100 | Grafana |
+| 8025 | 8025 | MailHog UI |
+| 8090 | 8090 | Kafka UI |
 
 ---
 
@@ -20,418 +336,56 @@ dev-vm/
   README.md
 ```
 
-The shared workspace folder is created at `~/workspace` (your home directory) and synced into the VM at `/home/vagrant/workspace`.
-
----
-
-## Features
-
-- **Interactive menu** — Setup, Cleanup, Health Check, Update, or Re-provision from a single entry point
-- **Fully parameterised** — pass all options as flags for CI/scripted use (`-SkipConfirm`)
-- **Cross-platform** — works on Windows (winget) and macOS (Homebrew)
-- **Auto-installs host tools** — VirtualBox, Vagrant, Helm, Docker CLI, Temurin JDK 21, and Maven via winget or brew
-- **Version pinning** — lock k3s and Node.js to specific versions (`-K3sVersion`, `-NodeVersion`)
-- **Health check** — one-command VM + cluster health report
-- **Software updates** — update all VM tools (system packages, k3s, CLI tools, npm)
-- **Snapshot** — automatic baseline snapshot after provisioning for quick restore
-- **SSH key injection** — host SSH public keys are automatically added to the VM
-- **Docker Hub login** — optional auto-login with `-DockerHubUser` and `-DockerHubToken`
-- **Checksum verification** — SHA256 verification for downloaded CLI tools
-- **GitHub API auth** — uses your GitHub token for API calls to avoid rate limits
-- **DryRun mode** — generate Vagrantfile without starting the VM (`-DryRun`)
-- **Retry on failure** — offers to retry provisioning if `vagrant up` fails
-- **Token masking** — GitHub and Docker Hub tokens are hidden during input
-- **Input validation** — numeric ranges, IP format, re-prompt on bad input
-- **Transcript logging** — full session log to `vagrant/setup-dev-vm.log`
-
-### VM Tool Stack
-
-#### Core Development Tools
-| Tool | Description |
-|------|-------------|
-| Docker CE | Container engine with Compose and Buildx plugins |
-| k3s | Lightweight Kubernetes (replaces KIND) |
-| Helm | Kubernetes package manager |
-| kubectl | Kubernetes CLI (ships with k3s) |
-
-#### Languages & Build Tools
-| Tool | Description |
-|------|-------------|
-| Java 21 | OpenJDK headless |
-| Maven | Java build tool and dependency manager |
-| Node.js LTS | JavaScript runtime + npm |
-| Yarn | Alternative Node.js package manager |
-| pnpm | Fast Node.js package manager |
-| Python3 | Python 3 with pip and venv |
-
-#### Database Clients
-| Tool | Description |
-|------|-------------|
-| psql | PostgreSQL client |
-| mysql | MySQL/MariaDB client |
-| redis-cli | Redis command-line client |
-| mongosh | MongoDB Shell (modern shell for MongoDB) |
-
-#### Infrastructure & DevOps
-| Tool | Description |
-|------|-------------|
-| Terraform | Infrastructure as Code tool |
-| GitHub CLI (gh) | GitHub command-line interface |
-
-#### CLI & Monitoring Tools
-| Tool | Description |
-|------|-------------|
-| k9s | Kubernetes terminal UI |
-| stern | Multi-pod log tailing for Kubernetes |
-| kubectx / kubens | Fast context & namespace switching |
-| yq | YAML processor |
-| lazydocker | Docker terminal UI |
-| jq | JSON processor |
-| dive | Docker image layer explorer & analyzer |
-| ctop | Container metrics viewer |
-
-#### Message Queue & Streaming
-| Tool | Description |
-|------|-------------|
-| Kafka CLI Tools | Apache Kafka command-line utilities (kafka-topics, kafka-console-consumer, etc.) |
-| kcat (kafkacat) | Generic command-line tool for Kafka producer/consumer |
-
-#### Object Storage
-| Tool | Description |
-|------|-------------|
-| MinIO Client (mc) | S3-compatible object storage CLI |
-
-#### Network & Utility Tools
-| Tool | Description |
-|------|-------------|
-| netcat | TCP/UDP networking utility |
-| dig/nslookup | DNS query tools |
-| telnet | Network protocol client |
-| wget/curl | File download utilities |
-| zip/p7zip | Archive utilities |
-
----
-
-## Prerequisites
-
-### Windows
-- Windows 10 or 11
-- PowerShell 5.1+ (pre-installed)
-
-### macOS
-- macOS 12+ (Monterey or later)
-- Homebrew (`/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`)
-- PowerShell Core (`brew install --cask powershell`)
-
-### Both
-- Internet connection
-
-> VirtualBox, Vagrant, Helm, Docker CLI, Temurin JDK 21, and Maven are installed automatically if missing (via winget on Windows, Homebrew on macOS).
-
----
-
-## Quick Start
-
-### Windows
-
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Unrestricted
-
-git clone <repo-url>
-cd <repo-directory>
-.\scripts\setup-dev-vm.ps1
-```
-
-### macOS
-
-```bash
-git clone <repo-url>
-cd <repo-directory>
-pwsh ./scripts/setup-dev-vm.ps1
-```
-
-The interactive menu will appear:
-
-```
-  1) Setup new Dev VM
-  2) Clean up / destroy Dev VM
-  3) Health check
-  4) Update VM software
-  5) Re-provision VM
-  6) Repair VM (diagnose & fix)
-```
-
-Select **1** and follow the prompts for GitHub token, Docker Hub token, CPU count, and memory.
-
-### Non-Interactive / CI Mode
-
-```powershell
-.\scripts\setup-dev-vm.ps1 -Action Setup -CPUs 4 -Memory 8192 -DiskGB 50 -SkipConfirm
-```
-
-All parameters are optional — unset values prompt interactively.
-
----
-
-## Configuration Files
-
-Settings are driven by two YAML files in the `vagrant/` directory:
-
-| File | Purpose | Committed? |
-|------|---------|------------|
-| `vagrant/defaults.yaml` | Default VM settings and port forwards | Yes |
-| `vagrant/env.yaml` | Your personal overrides | No (gitignored) |
-
-### Precedence
-
-```
-CLI params (-CPUs 8)  >  env.yaml  >  defaults.yaml  >  interactive prompt
-```
-
-### Customizing Ports
-
-Create `vagrant/env.yaml` to override any section. If you specify `ports`, it **replaces** the entire default list:
-
-```yaml
-# vagrant/env.yaml — override just what you need
-vm:
-  cpus: 8
-  memory: 16384
-
-ports:
-  - guest: 6443
-    host: 6443
-    description: k3s API
-  - guest: 8080
-    host: 8080
-  - guest: 3000
-    host: 3000
-  - guest: 5432
-    host: 5432
-    description: PostgreSQL
-  - guest: 443
-    host: 8443
-    description: Ingress HTTPS
-```
-
-Scalar values under `vm:` are merged per-key (only override what you specify). The `ports` list is replaced entirely if present.
-
-### Storing Credentials
-
-Add a `credentials:` section to `vagrant/env.yaml` to avoid re-entering tokens on every run. The file is gitignored, so your tokens stay local:
-
-```yaml
-# vagrant/env.yaml
-credentials:
-  github_token: ghp_xxxxxxxxxxxxxxxxxxxx
-  dockerhub_user: myuser
-  dockerhub_token: dckr_pat_xxxxxxxxxxxx
-```
-
-If you enter credentials interactively during setup, the script will offer to save them to `env.yaml` automatically. CLI parameters (`-GitHubToken`, `-DockerHubToken`, `-DockerHubUser`) always take highest precedence.
-
----
-
-## After Setup
-
-### SSH into the VM
-
-```powershell
-cd vagrant
-vagrant ssh
-```
-
-### Verify the tool stack
-
-```bash
-docker version
-kubectl get nodes
-k9s
-java -version
-mvn --version
-node -v
-helm version --short
-```
-
-### Access Kubernetes & Docker from the Host
-
-Helm, kubectl, and Docker CLI are installed on the host automatically. The kubeconfig is copied to `~/.kube/config-dev-vm` and the Docker daemon listens on TCP port 2375 over the private network.
-
-```powershell
-# PowerShell (Windows or macOS)
-$env:KUBECONFIG = "$HOME/.kube/config-dev-vm"
-$env:DOCKER_HOST = "tcp://192.168.56.10:2375"
-kubectl get nodes
-helm install my-release my-chart
-docker ps
-```
-
-```bash
-# Bash/Zsh (macOS)
-export KUBECONFIG="$HOME/.kube/config-dev-vm"
-export DOCKER_HOST="tcp://192.168.56.10:2375"
-kubectl get nodes
-helm install my-release my-chart
-docker ps
-```
-
-### Restore from Snapshot
-
-A `fresh-install` snapshot is automatically created after a successful setup. To restore:
-
-```powershell
-cd vagrant
-vagrant snapshot restore fresh-install
-```
-
----
-
-## Health Check
-
-Check the status of the VM, services, and Kubernetes cluster:
-
-```powershell
-.\scripts\setup-dev-vm.ps1 -Action Health
-```
-
-This reports:
-- VM status and service health (Docker, k3s)
-- Kubernetes node status
-- Disk and memory usage
-- Installed tool versions
-
----
-
-## Repair
-
-Diagnose and auto-fix common VM issues:
-
-```powershell
-.\scripts\setup-dev-vm.ps1 -Action Repair
-```
-
-Or select option **6** from the interactive menu. The repair engine:
-- Starts the VM if stopped or suspended
-- Restarts Docker or k3s if not active
-- Waits for the Kubernetes node to become Ready
-- Re-extracts the host kubeconfig if missing or broken
-- Reinstalls missing CLI tools (k9s, yq, lazydocker, kubectx, kubens)
-- Cleans disk space if usage exceeds 90% (prunes Docker images/cache, apt cache, journal logs)
-
-Repair also runs automatically after initial setup and after provisioning retries, ensuring the `fresh-install` snapshot captures a verified-healthy state.
-
----
-
-## Update VM Software
-
-Update all software inside the VM to their latest versions:
-
-```powershell
-.\scripts\setup-dev-vm.ps1 -Action Update
-```
-
-This updates:
-- System packages (`apt upgrade`)
-- k3s (checks stable channel, updates if newer)
-- CLI tools (k9s, yq, lazydocker, kubectx, kubens — via GitHub API)
-- npm (global update)
-- Re-exports kubeconfig after k3s update
-
----
-
-## Re-provision
-
-Re-run all provisioning stages without destroying the VM:
-
-```powershell
-.\scripts\setup-dev-vm.ps1 -Action Provision
-```
-
----
-
-## Cleanup
-
-Run the script again and choose option **2**, or:
-
-```powershell
-.\scripts\setup-dev-vm.ps1 -Action Cleanup
-```
-
-This will:
-1. Delete VM snapshots (with confirmation)
-2. Destroy the Vagrant VM
-3. Remove generated files (Vagrantfile, .vagrant/, log)
-4. Remove the `~/workspace` folder (with confirmation)
-5. Remove the host-side kubeconfig
-6. Optionally uninstall Vagrant and VirtualBox via winget/brew
-
-Use `-SkipConfirm` to skip all prompts.
-
----
-
-## Parameters
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `-Action` | Skip menu: `Setup`, `Cleanup`, `Health`, `Update`, `Provision`, `Repair` | (interactive) |
-| `-VMName` | VM name | `dev-vm` |
-| `-CPUs` | vCPU count (1-32) | `4` |
-| `-Memory` | RAM in MB (1024-65536) | `16384` |
-| `-DiskGB` | Root disk in GB (10-500) | `120` (updated for Moctra) |
-| `-PrivateIP` | Host-only network IP | `192.168.56.10` |
-| `-GitHubToken` | GitHub PAT (injected into VM, used for API calls) | (optional) |
-| `-DockerHubToken` | Docker Hub token | (optional) |
-| `-DockerHubUser` | Docker Hub username (enables `docker login`) | (optional) |
-| `-K3sVersion` | Pin k3s version (e.g. `v1.31.4+k3s1`) | latest |
-| `-NodeVersion` | Pin Node.js major version (e.g. `22`) | `lts` |
-| `-DryRun` | Generate Vagrantfile and exit | `$false` |
-| `-SkipConfirm` | Skip all confirmation prompts | `$false` |
-
-### Default Port Forwards
-
-Configured in `vagrant/defaults.yaml`. Override with `vagrant/env.yaml`.
-
-| Guest | Host | Purpose |
-|-------|------|---------|
-| 6443 | 6443 | k3s API |
-| 2375 | — | Docker API (via private network IP, always on) |
-| 8080 | 8080 | App server |
-| 3000 | 3000 | Dev server (React/Next.js) |
-| 3001 | 3001 | Additional dev server |
-| 4200 | 4200 | Angular dev server |
-| 5173 | 5173 | Vite dev server |
-| 30000 | 30000 | NodePort |
-| 443 | 8443 | Ingress HTTPS |
-| 5432 | 5432 | PostgreSQL |
-| 3306 | 3306 | MySQL/MariaDB |
-| 6379 | 6379 | Redis |
-| 27017 | 27017 | MongoDB |
-| 9092 | 9092 | Kafka |
-| 5672 | 5672 | RabbitMQ |
-| 9200 | 9200 | Elasticsearch |
-| 9090 | 9090 | Prometheus |
-| 4000 | 4000 | Moctra Frontend (React + BFF) |
-| 8180 | 8180 | Keycloak (IAM) |
-| 9000 | 9000 | MinIO S3 API |
-| 9001 | 9001 | MinIO Console UI |
-| 7880 | 7880 | LiveKit HTTP API |
-| 16686 | 16686 | Jaeger UI (Distributed Tracing) |
-| 3100 | 3100 | Grafana (Dashboards) |
-| 8025 | 8025 | MailHog UI (Dev Email) |
-| 8090 | 8090 | Kafka UI |
+The shared workspace folder is created at `~/workspace` and synced into the VM at `/home/vagrant/workspace`.
 
 ---
 
 ## Troubleshooting
 
-**VM fails to boot** — Ensure Hyper-V is disabled (`bcdedit /set hypervisorlaunchtype off` then reboot). VirtualBox requires hardware virtualization.
+### VM fails to boot
+Ensure hardware virtualization is enabled in BIOS and Hyper-V is disabled on Windows:
+```powershell
+# Run as Administrator, then reboot
+bcdedit /set hypervisorlaunchtype off
+```
 
-**SSH timeout during setup** — The script will offer to retry provisioning. The VM boot timeout is set to 600 seconds. You can also run `.\scripts\setup-dev-vm.ps1 -Action Provision` to re-provision.
+### Setup fails during provisioning
+The script will offer to retry. You can also re-provision without destroying the VM:
+```powershell
+.\scripts\setup-dev-vm.ps1 -Action Provision
+```
+Check the full log at `vagrant/setup-dev-vm.log` for detailed error output including line numbers and diagnostic dumps.
 
-**Docker permission denied** — Reload the VM (`cd vagrant && vagrant reload && vagrant ssh`) to apply group membership.
+### SSH timeout during setup
+The VM boot timeout is 600 seconds. If it's consistently timing out, increase CPUs/memory or check that VirtualBox is functioning (`VBoxManage list vms`).
 
-**kubectl fails on host** — Verify `KUBECONFIG` points to `~/.kube/config-dev-vm`.
+### Docker permission denied
+Reload the VM to apply group membership:
+```powershell
+cd vagrant
+vagrant reload
+vagrant ssh
+```
 
-**GitHub API rate limit** — Provide a `-GitHubToken` to increase API limits (used for CLI tool downloads).
+### kubectl fails on host
+Verify `KUBECONFIG` is set:
+```powershell
+$env:KUBECONFIG = "$HOME/.kube/config-dev-vm"
+kubectl get nodes
+```
 
-**Vagrant not found after install** — Reboot to refresh PATH, then re-run the script.
+### GitHub API rate limit during setup
+CLI tool downloads use the GitHub API (60 requests/hour unauthenticated). Provide a token to avoid this:
+```powershell
+.\scripts\setup-dev-vm.ps1 -Action Setup -GitHubToken ghp_your_token_here
+```
+Or store it in `vagrant/env.yaml` under `credentials.github_token`.
+
+### Vagrant not found after install
+Reboot to refresh PATH, then re-run the script.
+
+### Uninstall failures during cleanup
+If `winget uninstall` fails for VirtualBox, ensure no VMs are running and try running the cleanup as Administrator. The script stops VirtualBox services automatically, but a reboot may be needed if kernel drivers are locked.
+
+### Viewing logs
+All setup output is captured in `vagrant/setup-dev-vm.log`. On failure, the script dumps diagnostic information including PATH, installed tool locations, VirtualBox state, disk space, and (when possible) VM-side service status and system logs.
