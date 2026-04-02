@@ -121,6 +121,11 @@ function Refresh-Path {
     if ($IsWin) {
         $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'User') + ';' +
                     [System.Environment]::GetEnvironmentVariable('PATH', 'Machine')
+        # Ensure the WinGet Links directory is on PATH (winget installs shims here)
+        $wingetLinks = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links'
+        if ((Test-Path $wingetLinks) -and $env:PATH -notlike "*$wingetLinks*") {
+            $env:PATH += ";$wingetLinks"
+        }
     } else {
         # macOS: use path_helper and ensure Homebrew paths are included
         $pathHelper = & /usr/libexec/path_helper -s 2>$null
@@ -257,8 +262,9 @@ function Invoke-Repair {
     if ($vmState -eq 'saved' -or $vmState -eq 'suspended') {
         Write-Warn "VM is suspended. Resuming..."
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        vagrant resume 2>&1 | ForEach-Object { Write-Host "    $_" }
+        $resumeOutput = vagrant resume 2>&1
         $resumeExit = $LASTEXITCODE
+        $resumeOutput | ForEach-Object { Write-Host "    $_" }
         $ErrorActionPreference = $prevEAP
         if ($resumeExit -ne 0) {
             Write-Err "Failed to resume VM (exit $resumeExit)."
@@ -269,8 +275,9 @@ function Invoke-Repair {
     elseif ($vmState -eq 'poweroff' -or $vmState -eq 'aborted' -or $vmState -eq 'gurumeditation') {
         Write-Warn "VM is stopped (state: $vmState). Starting without re-provisioning..."
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        vagrant up --no-provision 2>&1 | ForEach-Object { Write-Host "    $_" }
+        $upOutput = vagrant up --no-provision 2>&1
         $upExit = $LASTEXITCODE
+        $upOutput | ForEach-Object { Write-Host "    $_" }
         $ErrorActionPreference = $prevEAP
         if ($upExit -ne 0) {
             Write-Err "Failed to start VM (exit $upExit)."
@@ -284,8 +291,9 @@ function Invoke-Repair {
     else {
         Write-Warn "Unexpected VM state: $vmState. Attempting vagrant up --no-provision..."
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        vagrant up --no-provision 2>&1 | ForEach-Object { Write-Host "    $_" }
+        $upOutput = vagrant up --no-provision 2>&1
         $ErrorActionPreference = $prevEAP
+        $upOutput | ForEach-Object { Write-Host "    $_" }
     }
 
     # ══════════════════════════════════════════════════════════
@@ -401,7 +409,7 @@ kubectl get nodes 2>/dev/null | grep -q ' Ready' && echo "READY" || echo "NOT_RE
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         vagrant ssh -c 'sudo cat /etc/rancher/k3s/k3s.yaml' 2>$null |
             ForEach-Object { $_ -replace 'server: https://127\.0\.0\.1:6443', "server: https://${repairIP}:6443" } |
-            Set-Content -Path $kubeconfigDest -Force
+            Set-Content -Path $kubeconfigDest -Force -Encoding utf8
         $ErrorActionPreference = $prevEAP
         if (Test-Path $kubeconfigDest) {
             Write-Ok "Kubeconfig re-extracted: $kubeconfigDest"
@@ -876,7 +884,7 @@ echo "  + npm updated to $(npm -v)"
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     vagrant ssh -c 'sudo cat /etc/rancher/k3s/k3s.yaml' 2>$null |
         ForEach-Object { $_ -replace 'server: https://127\.0\.0\.1:6443', "server: https://${PrivateIP}:6443" } |
-        Set-Content -Path $kubeconfigDest -Force
+        Set-Content -Path $kubeconfigDest -Force -Encoding utf8
     $ErrorActionPreference = $prevEAP
     Write-Ok "Kubeconfig refreshed: $kubeconfigDest"
 
@@ -911,8 +919,9 @@ if ($Action -eq 'Provision') {
 
     Write-Step 'Running vagrant provision...'
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    vagrant provision 2>&1 | ForEach-Object { Write-Host $_ }
+    $provOutput = vagrant provision 2>&1
     $provExitCode = $LASTEXITCODE
+    $provOutput | ForEach-Object { Write-Host $_ }
     $ErrorActionPreference = $prevEAP
 
     if ($provExitCode -eq 0) {
@@ -954,6 +963,36 @@ if ($IsWin) {
 }
 if (-not $isAdmin) {
     Write-Warn 'Running without administrator/root privileges. VirtualBox/Vagrant installs may require elevation.'
+}
+
+# ─── Winget check (Windows only) ────────────────────────────
+if ($IsWin -and -not (Get-Command winget -ErrorAction SilentlyContinue)) {
+    Write-Warn 'winget (Windows Package Manager) not found. Attempting to install...'
+    try {
+        $progressPref = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
+        $installerUrl  = 'https://aka.ms/getwinget'
+        $installerPath = Join-Path $env:TEMP 'Microsoft.DesktopAppInstaller.msixbundle'
+        Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
+        Add-AppxPackage -Path $installerPath -ErrorAction Stop
+        Remove-Item $installerPath -ErrorAction SilentlyContinue
+        $ProgressPreference = $progressPref
+        Refresh-Path
+    } catch {
+        Write-Err 'Failed to install winget automatically.'
+        Write-Err 'Please install it manually:'
+        Write-Err '  1. Open the Microsoft Store'
+        Write-Err '  2. Search for "App Installer" and install/update it'
+        Write-Err '  3. Re-run this script'
+        Stop-Transcript | Out-Null
+        exit 1
+    }
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Err 'winget still not available after install attempt.'
+        Write-Err 'Install manually from the Microsoft Store ("App Installer") and re-run.'
+        Stop-Transcript | Out-Null
+        exit 1
+    }
+    Write-Ok 'winget installed successfully.'
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -1043,7 +1082,7 @@ if ($credentialsEnteredInteractively -and -not $SkipConfirm) {
         if ($DockerHubUser)  { $envYaml.credentials['dockerhub_user']  = $DockerHubUser }
         if ($DockerHubToken) { $envYaml.credentials['dockerhub_token'] = $DockerHubToken }
 
-        $envYaml | ConvertTo-Yaml | Set-Content -Path $envFile -Force
+        $envYaml | ConvertTo-Yaml | Set-Content -Path $envFile -Force -Encoding utf8
         Write-Ok "Credentials saved to $envFile"
     }
 }
@@ -1222,7 +1261,7 @@ $hasTemurin21 = $false
 if ($IsWin) {
     $javaCmd = Get-Command java -ErrorAction SilentlyContinue
     if ($javaCmd) {
-        $javaVerOutput = & java -version 2>&1 | Out-String
+        $javaVerOutput = try { & java -version 2>&1 | Out-String } catch { '' }
         if ($javaVerOutput -match '21\.' -and $javaVerOutput -match 'Temurin') {
             $hasTemurin21 = $true
         }
@@ -1265,7 +1304,7 @@ if (-not $hasTemurin21) {
 # Set JAVA_HOME on the host
 if ($IsWin) {
     if (Get-Command java -ErrorAction SilentlyContinue) {
-        $javaVer = & java -version 2>&1 | Select-Object -First 1
+        $javaVer = try { & java -version 2>&1 | Select-Object -First 1 } catch { $null }
         Write-Ok "Java: $javaVer"
         # Resolve JAVA_HOME from the java.exe path (e.g. C:\Program Files\Eclipse Adoptium\jdk-21...\bin\java.exe -> parent\parent)
         $javaExe = (Get-Command java).Source
@@ -1966,11 +2005,11 @@ if (Test-Path $VagrantfilePath) {
         Write-Ok 'Vagrantfile is up to date (no changes detected)'
         $vagrantfileChanged = $false
     } else {
-        Set-Content -Path $VagrantfilePath -Value $Vagrantfile -Force
+        Set-Content -Path $VagrantfilePath -Value $Vagrantfile -Force -Encoding utf8
         Write-Ok "Vagrantfile updated: $VagrantfilePath"
     }
 } else {
-    Set-Content -Path $VagrantfilePath -Value $Vagrantfile -Force
+    Set-Content -Path $VagrantfilePath -Value $Vagrantfile -Force -Encoding utf8
     Write-Ok "Vagrantfile written to $VagrantfilePath"
 }
 
@@ -1990,8 +2029,9 @@ Write-Step 'Starting VM (vagrant up) - this will take several minutes...'
 # stderr, which PowerShell's StrictMode treats as terminating errors.
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
-vagrant up 2>&1 | ForEach-Object { Write-Host $_ }
+$vagrantOutput = vagrant up 2>&1
 $vagrantExitCode = $LASTEXITCODE
+$vagrantOutput | ForEach-Object { Write-Host $_ }
 $ErrorActionPreference = $prevEAP
 
 if ($vagrantExitCode -ne 0) {
@@ -2004,8 +2044,9 @@ if ($vagrantExitCode -ne 0) {
         if ($retry -match '^[Yy]') {
             Write-Step 'Retrying provisioning (vagrant provision)...'
             $ErrorActionPreference = 'Continue'
-            vagrant provision 2>&1 | ForEach-Object { Write-Host $_ }
+            $provisionOutput = vagrant provision 2>&1
             $vagrantExitCode = $LASTEXITCODE
+            $provisionOutput | ForEach-Object { Write-Host $_ }
             $ErrorActionPreference = $prevEAP
 
             if ($vagrantExitCode -ne 0) {
@@ -2039,9 +2080,11 @@ if (-not (Test-Path $kubeconfigDir)) {
 }
 
 # Pull the kubeconfig from the VM and rewrite the server address
+$prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'
 vagrant ssh -c "sudo cat /etc/rancher/k3s/k3s.yaml" 2>$null |
     ForEach-Object { $_ -replace 'server: https://127\.0\.0\.1:6443', "server: https://${PrivateIP}:6443" } |
-    Set-Content -Path $kubeconfigDest -Force
+    Set-Content -Path $kubeconfigDest -Force -Encoding utf8
+$ErrorActionPreference = $prevEAP
 
 if (Test-Path $kubeconfigDest) {
     Write-Ok "Kubeconfig saved to $kubeconfigDest"

@@ -324,12 +324,13 @@ if ($IsWin) {
 
         foreach ($tool in $wingetTools) {
             $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-            $installed = winget list --id $tool.Id --source winget 2>$null |
+            $installed = winget list --id $tool.Id --source winget `
+                             --accept-source-agreements --disable-interactivity 2>$null |
                          Select-String -Pattern ($tool.Id -replace '\.', '\.') -Quiet
             $ErrorActionPreference = $prevEAP
             if ($installed) {
                 if (Confirm-Step "Uninstall $($tool.Label) via winget?") {
-                    $result = Invoke-Uninstall -Label $tool.Label -Command ([scriptblock]::Create("winget uninstall --id $($tool.Id) --source winget"))
+                    $result = Invoke-Uninstall -Label $tool.Label -Command ([scriptblock]::Create("winget uninstall --id $($tool.Id) --source winget --silent --accept-source-agreements --disable-interactivity"))
                     if ($result) { $removedSomething = $true }
                 } else {
                     Write-Warn "Kept: $($tool.Label)"
