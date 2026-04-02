@@ -61,7 +61,7 @@ $homeDir    = if ($IsWin) { $env:USERPROFILE } else { $env:HOME }
 $env:VAGRANT_CWD = $VagrantDir
 
 # ─── Utilities ──────────────────────────────────────────────
-function Write-Step  { param([string]$Msg) Write-Host "`n>>> $Msg" -ForegroundColor Cyan }
+function Write-Step  { param([string]$Msg) Write-Host "`n>>> [$([DateTime]::Now.ToString('HH:mm:ss'))] $Msg" -ForegroundColor Cyan }
 function Write-Ok    { param([string]$Msg) Write-Host "  + $Msg" -ForegroundColor Green }
 function Write-Warn  { param([string]$Msg) Write-Host "  ! $Msg" -ForegroundColor Yellow }
 function Write-Err   { param([string]$Msg) Write-Host "  X $Msg" -ForegroundColor Red }
@@ -78,8 +78,9 @@ function Invoke-Uninstall {
     param([string]$Label, [scriptblock]$Command)
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try {
-        & $Command 2>&1 | ForEach-Object { Write-Host "    $_" }
+        $output = & $Command 2>&1
         $exitCode = $LASTEXITCODE
+        $output | ForEach-Object { Write-Host "    $_" }
     } finally {
         $ErrorActionPreference = $prevEAP
     }
@@ -91,6 +92,16 @@ function Invoke-Uninstall {
         return $true
     } else {
         Write-Err "$Label uninstall returned exit code $exitCode."
+        Write-Err "  Command: $($Command.ToString())"
+        # Log any processes that might be blocking the uninstall
+        if ($Label -match 'VirtualBox|Vagrant') {
+            $blocking = Get-Process -Name 'VBoxSVC', 'VBoxNetDHCP', 'VBoxNetNAT', 'VBoxHeadless', 'vagrant', 'ruby' -ErrorAction SilentlyContinue
+            if ($blocking) {
+                Write-Err "  Potentially blocking processes:"
+                $blocking | ForEach-Object { Write-Err "    $($_.ProcessName) (PID $($_.Id))" }
+            }
+        }
+        $script:hadFailures = $true
         return $false
     }
 }
@@ -113,6 +124,7 @@ if (-not $SkipConfirm) {
 }
 
 $removedSomething = $false
+$hadFailures = $false
 
 # ─────────────────────────────────────────────────────────────
 # 1. Kill & destroy the VM
@@ -129,7 +141,8 @@ if (Get-Command VBoxManage -ErrorAction SilentlyContinue) {
     $ErrorActionPreference = $prevEAP
 
     # Match the VM by name (quoted in VBoxManage output, e.g. "dev-vm" {uuid})
-    $vmEntry = $vboxVMs | Select-String -Pattern "^`"$VMName`"\s" | Select-Object -First 1
+    $escapedVMName = [regex]::Escape($VMName)
+    $vmEntry = $vboxVMs | Select-String -Pattern "^`"$escapedVMName`"\s" | Select-Object -First 1
     if ($vmEntry) {
         Write-Warn "Found VirtualBox VM: $VMName"
 
@@ -137,7 +150,7 @@ if (Get-Command VBoxManage -ErrorAction SilentlyContinue) {
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         $runningVMs = VBoxManage list runningvms 2>$null
         $ErrorActionPreference = $prevEAP
-        $isRunning = $runningVMs | Select-String -Pattern "^`"$VMName`"\s" -Quiet
+        $isRunning = $runningVMs | Select-String -Pattern "^`"$escapedVMName`"\s" -Quiet
 
         if ($isRunning) {
             Write-Warn "VM is running."
@@ -322,7 +335,21 @@ if ($IsWin) {
             @{ Id = 'Apache.Maven';        Label = 'Maven' }
         )
 
+        # Stop VirtualBox services before uninstalling to prevent failures
+        $vboxServicesStopped = $false
         foreach ($tool in $wingetTools) {
+            if ($tool.Id -eq 'Oracle.VirtualBox' -and -not $vboxServicesStopped) {
+                $vboxServices = Get-Service -Name 'VBoxSDS' -ErrorAction SilentlyContinue
+                if ($vboxServices -and $vboxServices.Status -eq 'Running') {
+                    Write-Warn 'Stopping VirtualBox services...'
+                    Stop-Service -Name 'VBoxSDS' -Force -ErrorAction SilentlyContinue
+                    $vboxServicesStopped = $true
+                }
+                # Also kill any lingering VirtualBox processes
+                Get-Process -Name 'VBoxSVC', 'VBoxNetDHCP', 'VBoxNetNAT' -ErrorAction SilentlyContinue |
+                    Stop-Process -Force -ErrorAction SilentlyContinue
+            }
+
             $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
             $installed = winget list --id $tool.Id --source winget `
                              --accept-source-agreements --disable-interactivity 2>$null |
@@ -330,7 +357,7 @@ if ($IsWin) {
             $ErrorActionPreference = $prevEAP
             if ($installed) {
                 if (Confirm-Step "Uninstall $($tool.Label) via winget?") {
-                    $result = Invoke-Uninstall -Label $tool.Label -Command ([scriptblock]::Create("winget uninstall --id $($tool.Id) --source winget --silent --accept-source-agreements --disable-interactivity"))
+                    $result = Invoke-Uninstall -Label $tool.Label -Command ([scriptblock]::Create("winget uninstall --id $($tool.Id) --source winget --silent --force --accept-source-agreements --disable-interactivity"))
                     if ($result) { $removedSomething = $true }
                 } else {
                     Write-Warn "Kept: $($tool.Label)"
@@ -412,7 +439,14 @@ if (-not $IsWin) {
 # Done
 # ─────────────────────────────────────────────────────────────
 Write-Host ''
-if ($removedSomething) {
+if ($hadFailures) {
+    Write-Host '======================================================' -ForegroundColor Yellow
+    Write-Host '  Cleanup finished with errors.' -ForegroundColor Yellow
+    Write-Host '  Some items could not be uninstalled. Check output above.' -ForegroundColor Yellow
+    Write-Host '======================================================' -ForegroundColor Yellow
+    Write-Host ''
+    exit 1
+} elseif ($removedSomething) {
     Write-Host '======================================================' -ForegroundColor Green
     Write-Host '  Cleanup complete.' -ForegroundColor Green
     Write-Host '======================================================' -ForegroundColor Green
@@ -420,3 +454,4 @@ if ($removedSomething) {
     Write-Host '  Nothing was removed.' -ForegroundColor Yellow
 }
 Write-Host ''
+exit 0

@@ -112,10 +112,66 @@ if (-not (Get-Module -ListAvailable -Name 'powershell-yaml')) {
 Import-Module powershell-yaml -ErrorAction Stop
 
 # ─── Utilities ──────────────────────────────────────────────
-function Write-Step  { param([string]$Msg) Write-Host "`n>>> $Msg" -ForegroundColor Cyan }
+function Write-Step  { param([string]$Msg) Write-Host "`n>>> [$([DateTime]::Now.ToString('HH:mm:ss'))] $Msg" -ForegroundColor Cyan }
 function Write-Ok    { param([string]$Msg) Write-Host "  + $Msg" -ForegroundColor Green }
 function Write-Warn  { param([string]$Msg) Write-Host "  ! $Msg" -ForegroundColor Yellow }
 function Write-Err   { param([string]$Msg) Write-Host "  X $Msg" -ForegroundColor Red }
+
+# Dump host diagnostics — call this on failures to capture context in the log
+function Write-Diagnostics {
+    param([string]$Context = 'general failure')
+    Write-Host ''
+    Write-Host '  ╔══════════════════════════════════════════════════╗' -ForegroundColor Red
+    Write-Host '  ║            DIAGNOSTIC INFORMATION               ║' -ForegroundColor Red
+    Write-Host '  ╚══════════════════════════════════════════════════╝' -ForegroundColor Red
+    Write-Host "  Context:    $Context" -ForegroundColor Red
+    Write-Host "  Timestamp:  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
+    Write-Host "  Platform:   $(if ($IsWin) { 'Windows' } else { 'macOS' })" -ForegroundColor DarkGray
+    Write-Host "  PS Version: $($PSVersionTable.PSVersion)" -ForegroundColor DarkGray
+    Write-Host "  Admin:      $(if ($isAdmin) { 'Yes' } else { 'No' })" -ForegroundColor DarkGray
+    Write-Host "  PATH:" -ForegroundColor DarkGray
+    ($env:PATH -split $(if ($IsWin) { ';' } else { ':' })) | ForEach-Object {
+        if ($_) { Write-Host "    $_" -ForegroundColor DarkGray }
+    }
+    Write-Host "  Key commands:" -ForegroundColor DarkGray
+    foreach ($cmd in 'VBoxManage', 'vagrant', 'winget', 'brew', 'kubectl', 'helm', 'java', 'mvn', 'docker') {
+        $found = Get-Command $cmd -ErrorAction SilentlyContinue
+        if ($found) {
+            Write-Host "    $cmd => $($found.Source)" -ForegroundColor DarkGray
+        } else {
+            Write-Host "    $cmd => NOT FOUND" -ForegroundColor DarkGray
+        }
+    }
+    if (Get-Command VBoxManage -ErrorAction SilentlyContinue) {
+        Write-Host "  VirtualBox version: $(VBoxManage --version 2>$null)" -ForegroundColor DarkGray
+        Write-Host "  VirtualBox VMs:" -ForegroundColor DarkGray
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        VBoxManage list vms 2>$null | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        Write-Host "  Host-only interfaces:" -ForegroundColor DarkGray
+        VBoxManage list hostonlyifs 2>$null | Select-String -Pattern 'Name:|IPAddress:' |
+            ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        VBoxManage list hostonlynets 2>$null | Select-String -Pattern 'Name:|LowerIP:|UpperIP:' |
+            ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        $ErrorActionPreference = $prevEAP
+    }
+    if ($IsWin) {
+        Write-Host "  Disk space (C:):" -ForegroundColor DarkGray
+        $drive = Get-PSDrive C -ErrorAction SilentlyContinue
+        if ($drive) {
+            $freeGB = [math]::Round($drive.Free / 1GB, 1)
+            $usedGB = [math]::Round($drive.Used / 1GB, 1)
+            Write-Host "    Free: ${freeGB}GB  Used: ${usedGB}GB" -ForegroundColor DarkGray
+        }
+    }
+    Write-Host ''
+}
+
+# Write file as UTF-8 without BOM (Windows PowerShell 5.1 Set-Content -Encoding utf8 adds a BOM)
+function Set-Utf8NoBom {
+    param([string]$Path, [string[]]$Content)
+    $text = $Content -join [Environment]::NewLine
+    [System.IO.File]::WriteAllText($Path, $text, [System.Text.UTF8Encoding]::new($false))
+}
 
 function Refresh-Path {
     if ($IsWin) {
@@ -130,8 +186,11 @@ function Refresh-Path {
         # macOS: use path_helper and ensure Homebrew paths are included
         $pathHelper = & /usr/libexec/path_helper -s 2>$null
         if ($pathHelper) {
-            $newPath = ($pathHelper -replace 'PATH="(.*?)";.*', '$1')
-            if ($newPath) { $env:PATH = $newPath }
+            $pathLine = $pathHelper | Where-Object { $_ -match '^PATH=' } | Select-Object -First 1
+            if ($pathLine) {
+                $newPath = ($pathLine -replace 'PATH="(.*?)";.*', '$1')
+                if ($newPath) { $env:PATH = $newPath }
+            }
         }
         foreach ($prefix in '/opt/homebrew/bin', '/usr/local/bin') {
             if ((Test-Path $prefix) -and $env:PATH -notlike "*${prefix}*") {
@@ -194,19 +253,19 @@ function Read-YamlConfig {
         $envConfig = Get-Content $envFile -Raw | ConvertFrom-Yaml
 
         # Deep merge vm section (scalar overrides)
-        if ($envConfig.ContainsKey('vm')) {
+        if ($envConfig.ContainsKey('vm') -and $null -ne $envConfig.vm) {
             foreach ($key in $envConfig.vm.Keys) {
                 $config.vm[$key] = $envConfig.vm[$key]
             }
         }
 
         # Replace ports list entirely if specified
-        if ($envConfig.ContainsKey('ports')) {
+        if ($envConfig.ContainsKey('ports') -and $null -ne $envConfig.ports) {
             $config['ports'] = $envConfig.ports
         }
 
         # Deep merge credentials section (scalar overrides)
-        if ($envConfig.ContainsKey('credentials')) {
+        if ($envConfig.ContainsKey('credentials') -and $null -ne $envConfig.credentials) {
             if (-not $config.ContainsKey('credentials')) {
                 $config['credentials'] = @{}
             }
@@ -407,9 +466,9 @@ kubectl get nodes 2>/dev/null | grep -q ' Ready' && echo "READY" || echo "NOT_RE
             New-Item -ItemType Directory -Path $kubeconfigDir -Force | Out-Null
         }
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        vagrant ssh -c 'sudo cat /etc/rancher/k3s/k3s.yaml' 2>$null |
-            ForEach-Object { $_ -replace 'server: https://127\.0\.0\.1:6443', "server: https://${repairIP}:6443" } |
-            Set-Content -Path $kubeconfigDest -Force -Encoding utf8
+        $kubeconfigContent = vagrant ssh -c 'sudo cat /etc/rancher/k3s/k3s.yaml' 2>$null |
+            ForEach-Object { $_ -replace 'server: https://127\.0\.0\.1:6443', "server: https://${repairIP}:6443" }
+        if ($kubeconfigContent) { Set-Utf8NoBom -Path $kubeconfigDest -Content $kubeconfigContent }
         $ErrorActionPreference = $prevEAP
         if (Test-Path $kubeconfigDest) {
             Write-Ok "Kubeconfig re-extracted: $kubeconfigDest"
@@ -427,7 +486,7 @@ kubectl get nodes 2>/dev/null | grep -q ' Ready' && echo "READY" || echo "NOT_RE
     $script:toolsToRepair = $null
     $toolCheckOutput = (vagrant ssh -c @'
 MISSING=""
-for tool in docker k3s kubectl helm java node npm k9s yq lazydocker kubectx kubens stern gh terraform python3 psql mysql redis-cli yarn pnpm mongosh kcat mc; do
+for tool in docker k3s kubectl helm java node npm k9s yq lazydocker kubectx kubens stern gh terraform python3 psql mysql redis-cli yarn pnpm kcat mc; do
     if ! command -v "$tool" &>/dev/null; then
         MISSING="$MISSING $tool"
     fi
@@ -466,7 +525,7 @@ fi
                 }
                 'k9s' {
                     Write-Warn "Reinstalling $tool..."
-                    vagrant ssh -c @'
+                    $k9sOutput = vagrant ssh -c @'
 URL=$(curl -s https://api.github.com/repos/derailed/k9s/releases/latest | grep "browser_download_url.*Linux_amd64.tar.gz" | head -1 | cut -d'"' -f4)
 if [ -n "$URL" ]; then
     curl -sL -o /tmp/k9s.tar.gz "$URL"
@@ -477,14 +536,14 @@ if [ -n "$URL" ]; then
 else
     echo "FAILED"
 fi
-'@ 2>$null | ForEach-Object {
-                        if ($_ -match 'REINSTALLED') { Write-Ok 'k9s reinstalled.' }
-                        elseif ($_ -match 'FAILED') { Write-Err 'Failed to get k9s download URL.'; $allHealthy = $false }
-                    }
+'@ 2>$null
+                    $k9sResult = ($k9sOutput | Out-String)
+                    if ($k9sResult -match 'REINSTALLED') { Write-Ok 'k9s reinstalled.' }
+                    elseif ($k9sResult -match 'FAILED') { Write-Err 'Failed to get k9s download URL.'; $allHealthy = $false }
                 }
                 'yq' {
                     Write-Warn "Reinstalling $tool..."
-                    vagrant ssh -c @'
+                    $yqOutput = vagrant ssh -c @'
 URL=$(curl -s https://api.github.com/repos/mikefarah/yq/releases/latest | grep 'browser_download_url.*yq_linux_amd64"' | head -1 | cut -d'"' -f4)
 if [ -n "$URL" ]; then
     sudo curl -sL -o /usr/local/bin/yq "$URL"
@@ -493,14 +552,14 @@ if [ -n "$URL" ]; then
 else
     echo "FAILED"
 fi
-'@ 2>$null | ForEach-Object {
-                        if ($_ -match 'REINSTALLED') { Write-Ok 'yq reinstalled.' }
-                        elseif ($_ -match 'FAILED') { Write-Err 'Failed to get yq download URL.'; $allHealthy = $false }
-                    }
+'@ 2>$null
+                    $yqResult = ($yqOutput | Out-String)
+                    if ($yqResult -match 'REINSTALLED') { Write-Ok 'yq reinstalled.' }
+                    elseif ($yqResult -match 'FAILED') { Write-Err 'Failed to get yq download URL.'; $allHealthy = $false }
                 }
                 'lazydocker' {
                     Write-Warn "Reinstalling $tool..."
-                    vagrant ssh -c @'
+                    $ldOutput = vagrant ssh -c @'
 URL=$(curl -s https://api.github.com/repos/jesseduffield/lazydocker/releases/latest | grep "browser_download_url.*Linux_x86_64.tar.gz" | head -1 | cut -d'"' -f4)
 if [ -n "$URL" ]; then
     curl -sL -o /tmp/lazydocker.tar.gz "$URL"
@@ -511,18 +570,18 @@ if [ -n "$URL" ]; then
 else
     echo "FAILED"
 fi
-'@ 2>$null | ForEach-Object {
-                        if ($_ -match 'REINSTALLED') { Write-Ok 'lazydocker reinstalled.' }
-                        elseif ($_ -match 'FAILED') { Write-Err 'Failed to get lazydocker download URL.'; $allHealthy = $false }
-                    }
+'@ 2>$null
+                    $ldResult = ($ldOutput | Out-String)
+                    if ($ldResult -match 'REINSTALLED') { Write-Ok 'lazydocker reinstalled.' }
+                    elseif ($ldResult -match 'FAILED') { Write-Err 'Failed to get lazydocker download URL.'; $allHealthy = $false }
                 }
                 { $_ -in 'kubectx', 'kubens' } {
                     Write-Warn "Reinstalling $_..."
                     $toolName = $_
-                    vagrant ssh -c "URL=`$(curl -s https://api.github.com/repos/ahmetb/kubectx/releases/latest | grep `"browser_download_url.*${toolName}_.*_linux_x86_64.tar.gz`" | head -1 | cut -d'`"' -f4); if [ -n `"`$URL`" ]; then curl -sL -o /tmp/${toolName}.tar.gz `"`$URL`"; tar -xzf /tmp/${toolName}.tar.gz -C /tmp ${toolName}; sudo mv /tmp/${toolName} /usr/local/bin/; rm -f /tmp/${toolName}.tar.gz; echo REINSTALLED; else echo FAILED; fi" 2>$null | ForEach-Object {
-                        if ($_ -match 'REINSTALLED') { Write-Ok "$toolName reinstalled." }
-                        elseif ($_ -match 'FAILED') { Write-Err "Failed to get $toolName download URL."; $allHealthy = $false }
-                    }
+                    $ktxOutput = vagrant ssh -c "URL=`$(curl -s https://api.github.com/repos/ahmetb/kubectx/releases/latest | grep `"browser_download_url.*${toolName}_.*_linux_x86_64.tar.gz`" | head -1 | cut -d'`"' -f4); if [ -n `"`$URL`" ]; then curl -sL -o /tmp/${toolName}.tar.gz `"`$URL`"; tar -xzf /tmp/${toolName}.tar.gz -C /tmp ${toolName}; sudo mv /tmp/${toolName} /usr/local/bin/; rm -f /tmp/${toolName}.tar.gz; echo REINSTALLED; else echo FAILED; fi" 2>$null
+                    $ktxResult = ($ktxOutput | Out-String)
+                    if ($ktxResult -match 'REINSTALLED') { Write-Ok "$toolName reinstalled." }
+                    elseif ($ktxResult -match 'FAILED') { Write-Err "Failed to get $toolName download URL."; $allHealthy = $false }
                 }
                 default {
                     Write-Warn "$tool is package-managed. Run Re-provision (option 5) to reinstall."
@@ -764,6 +823,13 @@ if ($Action -eq 'Update') {
         exit 1
     }
 
+    # Load config so we use the correct VM name and IP
+    $yamlConfig = Read-YamlConfig -ScriptDir $VagrantDir
+    if (-not $VMName)    { $VMName    = $yamlConfig.vm.name }
+    if (-not $VMName)    { $VMName    = 'dev-vm' }
+    if (-not $PrivateIP) { $PrivateIP = $yamlConfig.vm.private_ip }
+    if (-not $PrivateIP) { $PrivateIP = '192.168.56.10' }
+
     # Check VM is running
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     $vmStatus = vagrant status --machine-readable 2>$null |
@@ -779,13 +845,15 @@ if ($Action -eq 'Update') {
     # System packages
     Write-Step 'Updating system packages (apt)'
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    vagrant ssh -c 'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y 2>&1 | tail -5' 2>$null |
-        ForEach-Object { Write-Host "  $_" }
-    Write-Ok 'System packages updated.'
+    $aptOutput = vagrant ssh -c 'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y 2>&1 | tail -5' 2>$null
+    $aptExit = $LASTEXITCODE
+    $aptOutput | ForEach-Object { Write-Host "  $_" }
+    if ($aptExit -ne 0) { Write-Warn "apt-get upgrade may have failed (exit $aptExit)." }
+    else { Write-Ok 'System packages updated.' }
 
     # k3s update
     Write-Step 'Checking k3s update'
-    vagrant ssh -c @'
+    $k3sOutput = vagrant ssh -c @'
 set -e
 CURRENT=$(k3s --version 2>/dev/null | head -1 | awk '{print $3}')
 LATEST=$(curl -s https://update.k3s.io/v1-release/channels/stable | grep -oP '"latest":"[^"]*"' | head -1 | cut -d'"' -f4)
@@ -798,7 +866,10 @@ else
     curl -sfL https://get.k3s.io | sh - 2>&1 | tail -3
     echo "  + k3s updated to $(k3s --version | head -1 | awk '{print $3}')"
 fi
-'@ 2>$null | ForEach-Object { Write-Host $_ }
+'@ 2>$null
+    $k3sExit = $LASTEXITCODE
+    $k3sOutput | ForEach-Object { Write-Host $_ }
+    if ($k3sExit -ne 0) { Write-Warn "k3s update may have failed (exit $k3sExit)." }
 
     # CLI tools update
     Write-Step 'Checking CLI tool updates'
@@ -864,11 +935,14 @@ done
 
     # Node.js / npm
     Write-Step 'Checking Node.js updates'
-    vagrant ssh -c @'
+    $nodeOutput = vagrant ssh -c @'
 echo "  Node: $(node -v)  npm: $(npm -v)"
 sudo npm install -g npm@latest 2>&1 | tail -2
 echo "  + npm updated to $(npm -v)"
-'@ 2>$null | ForEach-Object { Write-Host $_ }
+'@ 2>$null
+    $nodeExit = $LASTEXITCODE
+    $nodeOutput | ForEach-Object { Write-Host $_ }
+    if ($nodeExit -ne 0) { Write-Warn "npm update may have failed (exit $nodeExit)." }
     $ErrorActionPreference = $prevEAP
 
     # Re-export kubeconfig in case k3s was updated
@@ -882,11 +956,15 @@ echo "  + npm updated to $(npm -v)"
         New-Item -ItemType Directory -Path $kubeconfigDir -Force | Out-Null
     }
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    vagrant ssh -c 'sudo cat /etc/rancher/k3s/k3s.yaml' 2>$null |
-        ForEach-Object { $_ -replace 'server: https://127\.0\.0\.1:6443', "server: https://${PrivateIP}:6443" } |
-        Set-Content -Path $kubeconfigDest -Force -Encoding utf8
+    $kubeconfigContent = vagrant ssh -c 'sudo cat /etc/rancher/k3s/k3s.yaml' 2>$null |
+        ForEach-Object { $_ -replace 'server: https://127\.0\.0\.1:6443', "server: https://${PrivateIP}:6443" }
     $ErrorActionPreference = $prevEAP
-    Write-Ok "Kubeconfig refreshed: $kubeconfigDest"
+    if ($kubeconfigContent) {
+        Set-Utf8NoBom -Path $kubeconfigDest -Content $kubeconfigContent
+        Write-Ok "Kubeconfig refreshed: $kubeconfigDest"
+    } else {
+        Write-Warn 'Could not extract kubeconfig from VM.'
+    }
 
     Write-Host ''
     Write-Host '======================================================' -ForegroundColor Green
@@ -964,6 +1042,29 @@ if ($IsWin) {
 if (-not $isAdmin) {
     Write-Warn 'Running without administrator/root privileges. VirtualBox/Vagrant installs may require elevation.'
 }
+
+# ─── Log host environment at start ──────────────────────────
+Write-Step 'Host environment'
+Write-Host "  Date:         $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
+Write-Host "  Platform:     $(if ($IsWin) { "Windows $([Environment]::OSVersion.Version)" } else { "macOS $(sw_vers -productVersion 2>$null)" })" -ForegroundColor DarkGray
+Write-Host "  PowerShell:   $($PSVersionTable.PSVersion)" -ForegroundColor DarkGray
+Write-Host "  Admin:        $isAdmin" -ForegroundColor DarkGray
+Write-Host "  Repo root:    $RepoRoot" -ForegroundColor DarkGray
+Write-Host "  Log file:     $LogFile" -ForegroundColor DarkGray
+$prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+if (Get-Command VBoxManage -ErrorAction SilentlyContinue) {
+    Write-Host "  VirtualBox:   $(VBoxManage --version 2>$null)" -ForegroundColor DarkGray
+}
+if (Get-Command vagrant -ErrorAction SilentlyContinue) {
+    Write-Host "  Vagrant:      $((vagrant --version 2>$null) -replace 'Vagrant ','')" -ForegroundColor DarkGray
+}
+if ($IsWin) {
+    $drive = Get-PSDrive C -ErrorAction SilentlyContinue
+    if ($drive) {
+        Write-Host "  Disk free:    $([math]::Round($drive.Free / 1GB, 1))GB (C:)" -ForegroundColor DarkGray
+    }
+}
+$ErrorActionPreference = $prevEAP
 
 # ─── Winget check (Windows only) ────────────────────────────
 if ($IsWin -and -not (Get-Command winget -ErrorAction SilentlyContinue)) {
@@ -1106,14 +1207,22 @@ if ($IsWin) {
 
     function Install-VirtualBox {
         Write-Warn 'VirtualBox not found - installing via winget...'
-        winget install --id Oracle.VirtualBox --source winget `
-            --accept-package-agreements --accept-source-agreements
+        $vboxOutput = winget install --id Oracle.VirtualBox --source winget `
+            --accept-package-agreements --accept-source-agreements 2>&1
+        $vboxExit = $LASTEXITCODE
+        $vboxOutput | ForEach-Object { Write-Host "    $_" }
+        if ($vboxExit -ne 0) {
+            Write-Err "winget install VirtualBox returned exit code $vboxExit"
+            Write-Diagnostics -Context 'VirtualBox install failed'
+        }
         Refresh-Path; Add-VBoxToPath
 
         if (-not (Get-Command VBoxManage -ErrorAction SilentlyContinue)) {
             Write-Err 'VirtualBox install failed. Install manually from https://www.virtualbox.org/wiki/Downloads and re-run.'
+            Write-Diagnostics -Context 'VBoxManage not found after install'
             Read-Host 'Press Enter to exit'; exit 1
         }
+        Write-Ok "VirtualBox installed: $(VBoxManage --version 2>$null)"
     }
 
     # Clean stale registry key pointing to a removed install
@@ -1155,15 +1264,19 @@ $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
 $hostNet = VBoxManage list hostonlyifs 2>$null |
            Select-String -Pattern "IPAddress:\s+$subnet\."
 if (-not $hostNet) {
-    # Also check host-only networks (VirtualBox 7+ / macOS)
+    # Also check host-only networks (VirtualBox 7+ / macOS) — match on LowerIP/UpperIP which contain the subnet
     $hostNet = VBoxManage list hostonlynets 2>$null |
-               Select-String -Pattern "NetworkMask:\s+$subnet\."
+               Select-String -Pattern "(LowerIP|UpperIP):\s+$subnet\."
 }
 if (-not $hostNet) {
     Write-Warn 'Creating host-only network adapter...'
     if ($IsMac) { Write-Warn 'macOS may prompt you to allow the VirtualBox kernel extension in System Settings > Privacy & Security.' }
     # Try modern hostonlynets first, fall back to legacy hostonlyifs
-    VBoxManage hostonlynet add --name "HostNetwork" --netmask 255.255.255.0 --lower-ip "${subnet}.1" --upper-ip "${subnet}.254" 2>$null
+    $netName = "DevVM-$subnet"
+    $existingNet = VBoxManage list hostonlynets 2>$null | Select-String -Pattern "Name:\s+$netName"
+    if (-not $existingNet) {
+        VBoxManage hostonlynet add --name $netName --netmask 255.255.255.0 --lower-ip "${subnet}.1" --upper-ip "${subnet}.254" 2>$null
+    }
     if ($LASTEXITCODE -ne 0) {
         VBoxManage hostonlyif create 2>$null
     }
@@ -1178,8 +1291,11 @@ Write-Step 'Checking Vagrant'
 if (-not (Get-Command vagrant -ErrorAction SilentlyContinue)) {
     if ($IsWin) {
         Write-Warn 'Vagrant not found - installing via winget...'
-        winget install --id HashiCorp.Vagrant --source winget `
-            --accept-package-agreements --accept-source-agreements
+        $vagrantInstOutput = winget install --id HashiCorp.Vagrant --source winget `
+            --accept-package-agreements --accept-source-agreements 2>&1
+        $vagrantInstExit = $LASTEXITCODE
+        $vagrantInstOutput | ForEach-Object { Write-Host "    $_" }
+        if ($vagrantInstExit -ne 0) { Write-Warn "winget install Vagrant returned exit code $vagrantInstExit" }
     } else {
         Write-Warn 'Vagrant not found - installing via Homebrew...'
         brew install --cask vagrant
@@ -1189,14 +1305,8 @@ if (-not (Get-Command vagrant -ErrorAction SilentlyContinue)) {
 Assert-Command 'vagrant' 'Reboot may be required after Vagrant install.'
 Write-Ok "$(vagrant --version)"
 
-# Install the vagrant-disksize plugin for disk resizing
 Write-Step 'Checking Vagrant plugins'
-$plugins = vagrant plugin list 2>$null
-if ($plugins -notmatch 'vagrant-disksize') {
-    Write-Warn 'Installing vagrant-disksize plugin...'
-    vagrant plugin install vagrant-disksize
-}
-Write-Ok 'Vagrant plugins ready'
+Write-Ok 'No required Vagrant plugins (using native disk API)'
 
 # ─────────────────────────────────────────────────────────────
 # 3b. Install Helm on host (if missing)
@@ -1205,8 +1315,11 @@ Write-Step 'Checking Helm (host)'
 if (-not (Get-Command helm -ErrorAction SilentlyContinue)) {
     if ($IsWin) {
         Write-Warn 'Helm not found - installing via winget...'
-        winget install --id Helm.Helm --source winget `
-            --accept-package-agreements --accept-source-agreements
+        $helmInstOutput = winget install --id Helm.Helm --source winget `
+            --accept-package-agreements --accept-source-agreements 2>&1
+        $helmInstExit = $LASTEXITCODE
+        $helmInstOutput | ForEach-Object { Write-Host "    $_" }
+        if ($helmInstExit -ne 0) { Write-Warn "winget install Helm returned exit code $helmInstExit" }
     } else {
         Write-Warn 'Helm not found - installing via Homebrew...'
         brew install helm
@@ -1227,13 +1340,16 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     if ($IsWin) {
         Write-Warn 'Docker CLI not found - installing via winget...'
         # Install just the CLI (not Docker Desktop)
-        winget install --id Docker.DockerCLI --source winget `
-            --accept-package-agreements --accept-source-agreements 2>$null
-        if ($LASTEXITCODE -ne 0) {
+        $dockerInstOutput = winget install --id Docker.DockerCLI --source winget `
+            --accept-package-agreements --accept-source-agreements 2>&1
+        $dockerInstExit = $LASTEXITCODE
+        $dockerInstOutput | ForEach-Object { Write-Host "    $_" }
+        if ($dockerInstExit -ne 0) {
             # Fallback: try the Docker CE CLI package
-            Write-Warn 'Docker.DockerCLI not found in winget, trying Docker.DockerCli...'
-            winget install --id Docker.DockerCli --source winget `
-                --accept-package-agreements --accept-source-agreements 2>$null
+            Write-Warn "Docker.DockerCLI install returned exit code $dockerInstExit, trying Docker.DockerCli..."
+            $dockerInstOutput2 = winget install --id Docker.DockerCli --source winget `
+                --accept-package-agreements --accept-source-agreements 2>&1
+            $dockerInstOutput2 | ForEach-Object { Write-Host "    $_" }
         }
     } else {
         Write-Warn 'Docker CLI not found - installing via Homebrew...'
@@ -1286,8 +1402,11 @@ if ($IsWin) {
 if (-not $hasTemurin21) {
     if ($IsWin) {
         Write-Warn 'Temurin JDK 21 not found - installing via winget...'
-        winget install --id EclipseAdoptium.Temurin.21.JDK --source winget `
-            --accept-package-agreements --accept-source-agreements
+        $javaInstOutput = winget install --id EclipseAdoptium.Temurin.21.JDK --source winget `
+            --accept-package-agreements --accept-source-agreements 2>&1
+        $javaInstExit = $LASTEXITCODE
+        $javaInstOutput | ForEach-Object { Write-Host "    $_" }
+        if ($javaInstExit -ne 0) { Write-Warn "winget install Temurin JDK returned exit code $javaInstExit" }
     } else {
         Write-Warn 'Temurin JDK 21 not found - installing via Homebrew...'
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
@@ -1355,8 +1474,11 @@ Write-Step 'Checking Maven (host)'
 if (-not (Get-Command mvn -ErrorAction SilentlyContinue)) {
     if ($IsWin) {
         Write-Warn 'Maven not found - installing via winget...'
-        winget install --id Apache.Maven --source winget `
-            --accept-package-agreements --accept-source-agreements
+        $mvnInstOutput = winget install --id Apache.Maven --source winget `
+            --accept-package-agreements --accept-source-agreements 2>&1
+        $mvnInstExit = $LASTEXITCODE
+        $mvnInstOutput | ForEach-Object { Write-Host "    $_" }
+        if ($mvnInstExit -ne 0) { Write-Warn "winget install Maven returned exit code $mvnInstExit" }
     } else {
         # Install Maven directly from Apache to avoid Homebrew pulling in openjdk (conflicts with Temurin)
         $mvnVersion = '3.9.9'
@@ -1492,7 +1614,7 @@ Vagrant.configure("2") do |config|
   config.vm.hostname = "%%VM_NAME%%"
 
   # -- Disk --
-  config.disksize.size = "%%DISK_GB%%GB"
+  config.vm.disk :disk, size: "%%DISK_GB%%GB", primary: true
 
   # -- Network --
   # Private network so the host can reach the k8s API directly.
@@ -1509,9 +1631,16 @@ Vagrant.configure("2") do |config|
     vb.cpus   = %%CPUS%%
 
     # Performance tweaks
-    vb.customize ["modifyvm", :id, "--ioapic",    "on"]
-    vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
-    vb.customize ["modifyvm", :id, "--natdnsproxy1",        "on"]
+    vb.customize ["modifyvm", :id, "--ioapic", "on"]
+
+    # VirtualBox 7.1+ removed --natdnshostresolver1/--natdnsproxy1
+    vbox_version = `VBoxManage --version`.strip.split("r")[0] rescue "0"
+    if Gem::Version.new(vbox_version) >= Gem::Version.new("7.1")
+      vb.customize ["modifyvm", :id, "--nat-localhostreachable1", "on"]
+    else
+      vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+      vb.customize ["modifyvm", :id, "--natdnsproxy1",        "on"]
+    end
 
     # Platform-specific tuning (largepages and KVM paravirt are Linux/Windows-only)
     if RUBY_PLATFORM =~ /darwin/
@@ -1537,6 +1666,7 @@ Vagrant.configure("2") do |config|
   # --- Stage 1: System prep ---
   config.vm.provision "shell", name: "base-packages", inline: <<-'SHELL'
     set -euo pipefail
+    trap 'echo "ERROR: base-packages stage failed at line $LINENO (exit $?)" >&2; echo "  System: $(uname -a)"; df -h / 2>/dev/null; exit 1' ERR
     echo ">>> Updating system & installing base packages"
     export DEBIAN_FRONTEND=noninteractive
     sudo apt-get update -qq
@@ -1546,42 +1676,47 @@ Vagrant.configure("2") do |config|
       postgresql-client mysql-client redis-tools \
       python3 python3-pip python3-venv \
       netcat-openbsd dnsutils iputils-ping telnet \
-      zip p7zip-full wget net-tools \
-      2>&1 | tail -5
+      zip p7zip-full wget net-tools
     echo "  + Base packages installed (including database clients, Python3, network tools)"
   SHELL
 
   # --- Stage 2: Java 21 ---
   config.vm.provision "shell", name: "java", inline: <<-'SHELL'
     set -euo pipefail
+    trap 'echo "ERROR: java stage failed at line $LINENO (exit $?)" >&2; exit 1' ERR
     echo ">>> Installing Java 21 (OpenJDK)"
     export DEBIAN_FRONTEND=noninteractive
-    sudo apt-get install -y --no-install-recommends openjdk-21-jdk-headless 2>&1 | tail -3
+    sudo apt-get install -y --no-install-recommends openjdk-21-jdk-headless
+    java -version 2>&1 || { echo "ERROR: java not found after install" >&2; exit 1; }
     echo "  + Java: $(java -version 2>&1 | head -1)"
   SHELL
 
   # --- Stage 2b: Maven ---
   config.vm.provision "shell", name: "maven", inline: <<-'SHELL'
     set -euo pipefail
+    trap 'echo "ERROR: maven stage failed at line $LINENO (exit $?)" >&2; exit 1' ERR
     echo ">>> Installing Maven"
     export DEBIAN_FRONTEND=noninteractive
-    sudo apt-get install -y --no-install-recommends maven 2>&1 | tail -3
+    sudo apt-get install -y --no-install-recommends maven
+    mvn --version 2>&1 || { echo "ERROR: mvn not found after install" >&2; exit 1; }
     echo "  + Maven: $(mvn --version 2>&1 | head -1)"
   SHELL
 
   # --- Stage 3: Node.js LTS ---
   config.vm.provision "shell", name: "nodejs", inline: <<-'SHELL'
     set -euo pipefail
+    trap 'echo "ERROR: nodejs stage failed at line $LINENO (exit $?)" >&2; exit 1' ERR
     echo ">>> Installing Node.js LTS"
     export DEBIAN_FRONTEND=noninteractive
-    curl -fsSL https://deb.nodesource.com/setup_%%NODE_VERSION%%.x | sudo bash - 2>&1 | tail -3
-    sudo apt-get install -y nodejs 2>&1 | tail -3
+    curl -fsSL https://deb.nodesource.com/setup_%%NODE_VERSION%%.x | sudo bash -
+    sudo apt-get install -y nodejs
     echo "  + Node $(node -v)  npm $(npm -v)"
   SHELL
 
   # --- Stage 4: Docker ---
   config.vm.provision "shell", name: "docker", inline: <<-'SHELL'
     set -euo pipefail
+    trap 'echo "ERROR: docker stage failed at line $LINENO (exit $?)" >&2; echo "  Docker status: $(systemctl is-active docker 2>/dev/null || echo unknown)"; exit 1' ERR
     echo ">>> Installing Docker CE"
     export DEBIAN_FRONTEND=noninteractive
     if ! command -v docker &>/dev/null; then
@@ -1593,8 +1728,7 @@ Vagrant.configure("2") do |config|
         sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
       sudo apt-get update -qq
       sudo apt-get install -y --no-install-recommends \
-        docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
-        2>&1 | tail -3
+        docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     fi
     sudo systemctl enable --now docker
     sudo usermod -aG docker vagrant
@@ -1615,10 +1749,13 @@ OVERRIDE
   # --- Stage 5: k3s ---
   config.vm.provision "shell", name: "k3s", inline: <<-'SHELL'
     set -euo pipefail
+    trap 'echo "ERROR: k3s stage failed at line $LINENO (exit $?)" >&2; echo "  k3s service: $(systemctl is-active k3s 2>/dev/null || echo unknown)"; journalctl -u k3s --no-pager -n 20 2>/dev/null || true; exit 1' ERR
     echo ">>> Installing k3s (lightweight Kubernetes)"
     export INSTALL_K3S_EXEC="--write-kubeconfig-mode 644 --disable traefik --tls-san %%PRIVATE_IP%% --node-external-ip %%PRIVATE_IP%% --flannel-iface eth1"
     K3S_VER='%%K3S_VERSION%%'
     if [ -n "$K3S_VER" ]; then export INSTALL_K3S_VERSION="$K3S_VER"; fi
+    echo "  k3s install flags: $INSTALL_K3S_EXEC"
+    echo "  k3s version pin:   ${INSTALL_K3S_VERSION:-latest}"
     curl -sfL https://get.k3s.io | sh -
 
     echo ">>> Waiting for k3s kubeconfig..."
@@ -1626,7 +1763,14 @@ OVERRIDE
       [ -f /etc/rancher/k3s/k3s.yaml ] && break
       sleep 2
     done
-    [ -f /etc/rancher/k3s/k3s.yaml ] || { echo "ERROR: k3s kubeconfig not found after 90s" >&2; exit 1; }
+    if [ ! -f /etc/rancher/k3s/k3s.yaml ]; then
+      echo "ERROR: k3s kubeconfig not found after 90s" >&2
+      echo "  k3s service status:" >&2
+      systemctl status k3s --no-pager 2>&1 | head -20 || true
+      echo "  k3s journal (last 30 lines):" >&2
+      journalctl -u k3s --no-pager -n 30 2>/dev/null || true
+      exit 1
+    fi
 
     echo ">>> Waiting for k3s node to be Ready..."
     export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
@@ -1634,20 +1778,34 @@ OVERRIDE
       kubectl get nodes 2>/dev/null | grep -q ' Ready' && break
       sleep 2
     done
+    if ! kubectl get nodes 2>/dev/null | grep -q ' Ready'; then
+      echo "ERROR: k3s node not Ready after 120s" >&2
+      echo "  Node status:" >&2
+      kubectl get nodes -o wide 2>&1 || true
+      echo "  k3s journal (last 30 lines):" >&2
+      journalctl -u k3s --no-pager -n 30 2>/dev/null || true
+      echo "  System pods:" >&2
+      kubectl get pods -A 2>&1 || true
+      exit 1
+    fi
     echo "  + k3s: $(k3s --version | head -1)"
   SHELL
 
   # --- Stage 6: Helm ---
   config.vm.provision "shell", name: "helm", inline: <<-'SHELL'
     set -euo pipefail
+    trap 'echo "ERROR: helm stage failed at line $LINENO (exit $?)" >&2; exit 1' ERR
     echo ">>> Installing Helm"
     curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+    helm version --short || { echo "ERROR: helm not found after install" >&2; exit 1; }
     echo "  + $(helm version --short)"
   SHELL
 
   # --- Stage 7: Extra CLI tools ---
-  config.vm.provision "shell", name: "cli-tools", inline: <<-'SHELL'
+  config.vm.provision "shell", name: "cli-tools", env: { "GITHUB_TOKEN" => "%%GH_TOKEN%%" }, inline: <<-'SHELL'
     set -euo pipefail
+    trap 'echo "ERROR: cli-tools stage failed at line $LINENO (exit $?)" >&2; echo "  GitHub API rate limit remaining:"; curl -s https://api.github.com/rate_limit 2>/dev/null | grep -A2 '"rate"' || true; exit 1' ERR
+    echo "  GitHub token: $(if [ -n "${GITHUB_TOKEN:-}" ]; then echo "provided (authenticated API)"; else echo "NOT SET (60 req/hr limit)"; fi)"
 
     # Helper: authenticated GitHub API calls (avoids 60-req/hr rate limit)
     gh_api() {
@@ -1751,7 +1909,7 @@ OVERRIDE
       sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
       echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
       sudo apt-get update -qq
-      sudo apt-get install -y gh 2>&1 | tail -3
+      sudo apt-get install -y gh
       echo "  + gh: $(gh --version | head -1)"
     fi
 
@@ -1760,7 +1918,7 @@ OVERRIDE
       wget -qO- https://apt.releases.hashicorp.com/gpg | gpg --dearmor | sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg > /dev/null
       echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
       sudo apt-get update -qq
-      sudo apt-get install -y terraform 2>&1 | tail -3
+      sudo apt-get install -y terraform
       echo "  + Terraform: $(terraform version | head -1)"
     fi
 
@@ -1770,17 +1928,18 @@ OVERRIDE
   # --- Stage 7b: Additional development tools ---
   config.vm.provision "shell", name: "additional-dev-tools", inline: <<-'SHELL'
     set -euo pipefail
+    trap 'echo "ERROR: additional-dev-tools stage failed at line $LINENO (exit $?)" >&2; exit 1' ERR
     echo ">>> Installing additional development utilities"
 
     echo ">>> Installing yarn (alternative Node.js package manager)"
     if ! command -v yarn &>/dev/null; then
-      sudo npm install -g yarn 2>&1 | tail -2
+      sudo npm install -g yarn
       echo "  + Yarn: $(yarn --version)"
     fi
 
     echo ">>> Installing pnpm (fast Node.js package manager)"
     if ! command -v pnpm &>/dev/null; then
-      sudo npm install -g pnpm 2>&1 | tail -2
+      sudo npm install -g pnpm
       echo "  + pnpm: $(pnpm --version)"
     fi
 
@@ -1788,8 +1947,9 @@ OVERRIDE
   SHELL
 
   # --- Stage 7c: Moctra-specific tools ---
-  config.vm.provision "shell", name: "moctra-tools", inline: <<-'SHELL'
+  config.vm.provision "shell", name: "moctra-tools", env: { "GITHUB_TOKEN" => "%%GH_TOKEN%%" }, inline: <<-'SHELL'
     set -euo pipefail
+    trap 'echo "ERROR: moctra-tools stage failed at line $LINENO (exit $?)" >&2; exit 1' ERR
     echo ">>> Installing Moctra-specific development tools"
 
     # Helper: authenticated GitHub API calls
@@ -1801,15 +1961,6 @@ OVERRIDE
       fi
       curl "${args[@]}" "$url"
     }
-
-    echo ">>> Installing MongoDB Shell (mongosh)"
-    if ! command -v mongosh &>/dev/null; then
-      wget -qO- https://www.mongodb.org/static/pgp/server-7.0.asc | sudo gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg
-      echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
-      sudo apt-get update -qq
-      sudo apt-get install -y mongodb-mongosh 2>&1 | tail -3
-      echo "  + mongosh: $(mongosh --version | head -1)"
-    fi
 
     echo ">>> Installing Apache Kafka CLI tools"
     if ! command -v kafka-topics.sh &>/dev/null; then
@@ -1834,32 +1985,44 @@ OVERRIDE
 
     echo ">>> Installing kcat (Kafka CLI tool, formerly kafkacat)"
     if ! command -v kcat &>/dev/null; then
-      sudo apt-get install -y --no-install-recommends kcat 2>&1 | tail -3
+      sudo apt-get install -y --no-install-recommends kcat
       echo "  + kcat: $(kcat -V 2>&1 | head -1)"
     fi
 
     echo ">>> Installing dive (Docker image layer explorer)"
     if ! command -v dive &>/dev/null; then
-      DIVE_VERSION="0.12.0"
-      curl -sL -o /tmp/dive.deb "https://github.com/wagoodman/dive/releases/download/v${DIVE_VERSION}/dive_${DIVE_VERSION}_linux_amd64.deb"
-      sudo dpkg -i /tmp/dive.deb 2>&1 | tail -3
-      rm -f /tmp/dive.deb
-      echo "  + dive: $(dive --version 2>&1 | head -1)"
+      DIVE_REL=$(gh_api https://api.github.com/repos/wagoodman/dive/releases/latest)
+      DIVE_VERSION=$(echo "$DIVE_REL" | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
+      if [ -n "$DIVE_VERSION" ]; then
+        curl -sL -o /tmp/dive.deb "https://github.com/wagoodman/dive/releases/download/v${DIVE_VERSION}/dive_${DIVE_VERSION}_linux_amd64.deb"
+        sudo dpkg -i /tmp/dive.deb
+        rm -f /tmp/dive.deb
+        echo "  + dive: $(dive --version 2>&1 | head -1)"
+      else
+        echo "  ! Failed to get dive version (GitHub API rate limit?)"
+      fi
     fi
 
     echo ">>> Installing ctop (container metrics viewer)"
     if ! command -v ctop &>/dev/null; then
-      sudo wget -q https://github.com/bcicen/ctop/releases/latest/download/ctop-0.7.7-linux-amd64 -O /usr/local/bin/ctop
-      sudo chmod +x /usr/local/bin/ctop
-      echo "  + ctop: $(ctop -v 2>&1)"
+      CTOP_REL=$(gh_api https://api.github.com/repos/bcicen/ctop/releases/latest)
+      CTOP_URL=$(echo "$CTOP_REL" | grep "browser_download_url.*linux-amd64" | head -1 | cut -d'"' -f4)
+      if [ -n "$CTOP_URL" ]; then
+        sudo curl -sL -o /usr/local/bin/ctop "$CTOP_URL"
+        sudo chmod +x /usr/local/bin/ctop
+        echo "  + ctop: $(ctop -v 2>&1)"
+      else
+        echo "  ! Failed to get ctop download URL (GitHub API rate limit?)"
+      fi
     fi
 
-    echo "  + Moctra-specific tools installed: mongosh, kafka-cli, mc, kcat, dive, ctop"
+    echo "  + Moctra-specific tools installed: kafka-cli, mc, kcat, dive, ctop"
   SHELL
 
   # --- Stage 8: User environment ---
   config.vm.provision "shell", name: "env-setup", inline: <<-'SHELL'
     set -euo pipefail
+    trap 'echo "ERROR: env-setup stage failed at line $LINENO (exit $?)" >&2; exit 1' ERR
     echo ">>> Configuring vagrant user environment"
 
     # kubeconfig for vagrant user
@@ -1900,10 +2063,10 @@ BASHRC_BLOCK
     GH_TOKEN='%%GH_TOKEN%%'
     DH_TOKEN='%%DH_TOKEN%%'
     if [ -n "$GH_TOKEN" ] && ! grep -q 'GITHUB_TOKEN' /home/vagrant/.bashrc 2>/dev/null; then
-      echo "export GITHUB_TOKEN='$GH_TOKEN'" >> /home/vagrant/.bashrc
+      printf 'export GITHUB_TOKEN=%q\n' "$GH_TOKEN" >> /home/vagrant/.bashrc
     fi
     if [ -n "$DH_TOKEN" ] && ! grep -q 'DOCKERHUB_TOKEN' /home/vagrant/.bashrc 2>/dev/null; then
-      echo "export DOCKERHUB_TOKEN='$DH_TOKEN'" >> /home/vagrant/.bashrc
+      printf 'export DOCKERHUB_TOKEN=%q\n' "$DH_TOKEN" >> /home/vagrant/.bashrc
     fi
 
     chown vagrant:vagrant /home/vagrant/.bashrc
@@ -1925,7 +2088,7 @@ BASHRC_BLOCK
     # Docker login (if credentials provided)
     DH_USER='%%DH_USER%%'
     if [ -n "$DH_USER" ] && [ -n "$DH_TOKEN" ]; then
-      echo "$DH_TOKEN" | sudo -u vagrant docker login -u "$DH_USER" --password-stdin 2>&1 | tail -1
+      echo "$DH_TOKEN" | sudo -u vagrant docker login -u "$DH_USER" --password-stdin 2>&1
       echo "  + Docker Hub login configured for $DH_USER"
     fi
 
@@ -1952,7 +2115,6 @@ BASHRC_BLOCK
     printf "  %-15s %s\n" "yq:"         "$(yq --version 2>/dev/null || echo 'NOT FOUND')"
     printf "  %-15s %s\n" "PostgreSQL:" "$(psql --version 2>/dev/null || echo 'NOT FOUND')"
     printf "  %-15s %s\n" "Redis:"      "$(redis-cli --version 2>/dev/null || echo 'NOT FOUND')"
-    printf "  %-15s %s\n" "MongoDB:"    "$(mongosh --version 2>/dev/null | head -1 || echo 'NOT FOUND')"
     printf "  %-15s %s\n" "Kafka CLI:"  "$([[ -f /opt/kafka/bin/kafka-topics.sh ]] && echo '3.7.0' || echo 'NOT FOUND')"
     printf "  %-15s %s\n" "MinIO mc:"   "$(mc --version 2>/dev/null | head -1 || echo 'NOT FOUND')"
     printf "  %-15s %s\n" "kcat:"       "$(kcat -V 2>&1 | head -1 || echo 'NOT FOUND')"
@@ -1987,7 +2149,8 @@ $Vagrantfile = $Vagrantfile.Replace('%%K3S_VERSION%%',   $k3sVersionValue)
 # Workspace path for Vagrantfile (forward slashes for Ruby/Vagrant)
 $workspaceForVagrant = $workspace -replace '\\', '/'
 $Vagrantfile = $Vagrantfile.Replace('%%WORKSPACE%%',     $workspaceForVagrant)
-$Vagrantfile = $Vagrantfile.Replace('%%SSH_PUB_KEYS%%',  $sshPubKeys)
+$sshPubKeysEscaped = if ($sshPubKeys) { $sshPubKeys -replace "'", "'\\''" } else { '' }
+$Vagrantfile = $Vagrantfile.Replace('%%SSH_PUB_KEYS%%',  $sshPubKeysEscaped)
 
 # Ensure vagrant directory exists
 if (-not (Test-Path $VagrantDir)) {
@@ -2005,7 +2168,7 @@ if (Test-Path $VagrantfilePath) {
         Write-Ok 'Vagrantfile is up to date (no changes detected)'
         $vagrantfileChanged = $false
     } else {
-        Set-Content -Path $VagrantfilePath -Value $Vagrantfile -Force -Encoding utf8
+        Set-Utf8NoBom -Path $VagrantfilePath -Content $Vagrantfile
         Write-Ok "Vagrantfile updated: $VagrantfilePath"
     }
 } else {
@@ -2037,6 +2200,30 @@ $ErrorActionPreference = $prevEAP
 if ($vagrantExitCode -ne 0) {
     Write-Err "vagrant up failed (exit $vagrantExitCode). Check logs above."
     Write-Warn "Full log: $LogFile"
+    Write-Diagnostics -Context "vagrant up failed (exit $vagrantExitCode)"
+
+    # Dump VM-side logs if SSH is reachable
+    $prevEAP2 = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    Write-Host '  Attempting to retrieve VM-side diagnostics...' -ForegroundColor DarkGray
+    $vmDiag = vagrant ssh -c @'
+echo "=== VM DIAGNOSTICS ==="
+echo "Hostname: $(hostname)"
+echo "Uptime: $(uptime)"
+echo "Disk:"
+df -h / 2>/dev/null
+echo "Memory:"
+free -h 2>/dev/null
+echo "Failed services:"
+systemctl --failed 2>/dev/null || true
+echo "Docker status: $(systemctl is-active docker 2>/dev/null || echo 'not installed')"
+echo "k3s status: $(systemctl is-active k3s 2>/dev/null || echo 'not installed')"
+echo "Last 15 lines of syslog:"
+tail -15 /var/log/syslog 2>/dev/null || journalctl -n 15 --no-pager 2>/dev/null || echo "(unavailable)"
+echo "=== END DIAGNOSTICS ==="
+'@ 2>$null
+    if ($vmDiag) { $vmDiag | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
+    else { Write-Warn 'Could not SSH into VM for diagnostics.' }
+    $ErrorActionPreference = $prevEAP2
 
     # Offer retry — useful when the VM booted but provisioning timed out
     if (-not $SkipConfirm) {
@@ -2081,9 +2268,9 @@ if (-not (Test-Path $kubeconfigDir)) {
 
 # Pull the kubeconfig from the VM and rewrite the server address
 $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'
-vagrant ssh -c "sudo cat /etc/rancher/k3s/k3s.yaml" 2>$null |
-    ForEach-Object { $_ -replace 'server: https://127\.0\.0\.1:6443', "server: https://${PrivateIP}:6443" } |
-    Set-Content -Path $kubeconfigDest -Force -Encoding utf8
+$kubeconfigContent = vagrant ssh -c "sudo cat /etc/rancher/k3s/k3s.yaml" 2>$null |
+    ForEach-Object { $_ -replace 'server: https://127\.0\.0\.1:6443', "server: https://${PrivateIP}:6443" }
+if ($kubeconfigContent) { Set-Utf8NoBom -Path $kubeconfigDest -Content $kubeconfigContent }
 $ErrorActionPreference = $prevEAP
 
 if (Test-Path $kubeconfigDest) {

@@ -30,9 +30,6 @@ ports:
   - guest: 6379
     host: 6379
     description: Redis
-  - guest: 27017
-    host: 27017
-    description: MongoDB
   - guest: 9092
     host: 9092
     description: Kafka
