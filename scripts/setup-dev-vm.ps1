@@ -100,6 +100,10 @@ $IsWin = -not $IsMac
 $RepoRoot   = Split-Path $PSScriptRoot -Parent
 $VagrantDir = Join-Path $RepoRoot 'vagrant'
 $homeDir    = if ($IsWin) { $env:USERPROFILE } else { $env:HOME }
+if (-not $homeDir) {
+    Write-Host '  X Cannot determine home directory ($env:USERPROFILE / $env:HOME is empty).' -ForegroundColor Red
+    exit 1
+}
 
 # Tell vagrant where to find the Vagrantfile
 $env:VAGRANT_CWD = $VagrantDir
@@ -107,7 +111,16 @@ $env:VAGRANT_CWD = $VagrantDir
 # ─── YAML support ───────────────────────────────────────────
 if (-not (Get-Module -ListAvailable -Name 'powershell-yaml')) {
     Write-Host '  ! Installing powershell-yaml module...' -ForegroundColor Yellow
-    Install-Module -Name powershell-yaml -Force -Scope CurrentUser
+    try {
+        if (-not (Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue)) {
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+        }
+        Install-Module -Name powershell-yaml -Force -Scope CurrentUser -AllowClobber
+    } catch {
+        Write-Host "  X Failed to install powershell-yaml module: $_" -ForegroundColor Red
+        Write-Host '    Check internet connectivity or install manually: Install-Module powershell-yaml' -ForegroundColor Yellow
+        exit 1
+    }
 }
 Import-Module powershell-yaml -ErrorAction Stop
 
@@ -128,7 +141,8 @@ function Write-Diagnostics {
     Write-Host "  Timestamp:  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
     Write-Host "  Platform:   $(if ($IsWin) { 'Windows' } else { 'macOS' })" -ForegroundColor DarkGray
     Write-Host "  PS Version: $($PSVersionTable.PSVersion)" -ForegroundColor DarkGray
-    Write-Host "  Admin:      $(if ($isAdmin) { 'Yes' } else { 'No' })" -ForegroundColor DarkGray
+    $adminStatus = if (Get-Variable isAdmin -Scope Script -ValueOnly -ErrorAction SilentlyContinue) { 'Yes' } else { 'No/Unknown' }
+    Write-Host "  Admin:      $adminStatus" -ForegroundColor DarkGray
     Write-Host "  PATH:" -ForegroundColor DarkGray
     ($env:PATH -split $(if ($IsWin) { ';' } else { ':' })) | ForEach-Object {
         if ($_) { Write-Host "    $_" -ForegroundColor DarkGray }
@@ -204,7 +218,7 @@ function Assert-Command {
     param([string]$Name, [string]$Hint)
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         Write-Err "$Name not found after install. $Hint"
-        Read-Host 'Press Enter to exit'; exit 1
+        if (-not $SkipConfirm) { Read-Host 'Press Enter to exit' }; exit 1
     }
 }
 
@@ -245,12 +259,29 @@ function Read-YamlConfig {
         Write-Err "defaults.yaml not found at: $defaultsFile"
         exit 1
     }
-    $config = Get-Content $defaultsFile -Raw | ConvertFrom-Yaml
+    try {
+        $config = Get-Content $defaultsFile -Raw | ConvertFrom-Yaml
+    } catch {
+        Write-Err "Failed to parse defaults.yaml: $_"
+        exit 1
+    }
+    if ($null -eq $config) {
+        Write-Err "defaults.yaml is empty or invalid: $defaultsFile"
+        exit 1
+    }
+    # Normalize PSCustomObject to hashtable if needed
+    if ($config -isnot [hashtable]) {
+        $ht = @{}; $config.PSObject.Properties | ForEach-Object { $ht[$_.Name] = $_.Value }; $config = $ht
+    }
 
     # Merge env.yaml overrides (optional)
     if (Test-Path $envFile) {
         Write-Ok 'Loading overrides from env.yaml'
-        $envConfig = Get-Content $envFile -Raw | ConvertFrom-Yaml
+        $envConfig = try { Get-Content $envFile -Raw | ConvertFrom-Yaml } catch { $null }
+        if ($null -eq $envConfig) { $envConfig = @{} }
+        if ($envConfig -isnot [hashtable]) {
+            $ht = @{}; $envConfig.PSObject.Properties | ForEach-Object { $ht[$_.Name] = $_.Value }; $envConfig = $ht
+        }
 
         # Deep merge vm section (scalar overrides)
         if ($envConfig.ContainsKey('vm') -and $null -ne $envConfig.vm) {
@@ -310,7 +341,8 @@ function Invoke-Repair {
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     $vmState = vagrant status --machine-readable 2>$null |
                Select-String -Pattern ',state,' |
-               ForEach-Object { ($_ -split ',')[3] }
+               ForEach-Object { ($_ -split ',')[3] } |
+               Select-Object -First 1
     $ErrorActionPreference = $prevEAP
 
     if (-not $vmState -or $vmState -eq 'not_created') {
@@ -722,7 +754,8 @@ if ($Action -eq 'Health') {
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     $vmStatus = vagrant status --machine-readable 2>$null |
                 Select-String -Pattern ',state,' |
-                ForEach-Object { ($_ -split ',')[3] }
+                ForEach-Object { ($_ -split ',')[3] } |
+                Select-Object -First 1
     $ErrorActionPreference = $prevEAP
 
     if (-not $vmStatus -or $vmStatus -eq 'not_created') {
@@ -834,7 +867,8 @@ if ($Action -eq 'Update') {
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     $vmStatus = vagrant status --machine-readable 2>$null |
                 Select-String -Pattern ',state,' |
-                ForEach-Object { ($_ -split ',')[3] }
+                ForEach-Object { ($_ -split ',')[3] } |
+                Select-Object -First 1
     $ErrorActionPreference = $prevEAP
 
     if ($vmStatus -ne 'running') {
@@ -1030,7 +1064,10 @@ if ($Action -eq 'Repair') {
 # ─── Elapsed-time tracking & log ─────────────────────────────
 $ScriptStart = Get-Date
 $LogFile     = Join-Path $VagrantDir 'setup-dev-vm.log'
-Start-Transcript -Path $LogFile -Append | Out-Null
+if (-not (Test-Path $VagrantDir)) { New-Item -ItemType Directory -Path $VagrantDir -Force | Out-Null }
+try { Start-Transcript -Path $LogFile -Append | Out-Null } catch {
+    Write-Warn "Could not start transcript: $_"
+}
 
 # ─── Admin check ─────────────────────────────────────────────
 if ($IsWin) {
@@ -1084,13 +1121,13 @@ if ($IsWin -and -not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Write-Err '  1. Open the Microsoft Store'
         Write-Err '  2. Search for "App Installer" and install/update it'
         Write-Err '  3. Re-run this script'
-        Stop-Transcript | Out-Null
+        try { Stop-Transcript | Out-Null } catch {}
         exit 1
     }
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Write-Err 'winget still not available after install attempt.'
         Write-Err 'Install manually from the Microsoft Store ("App Installer") and re-run.'
-        Stop-Transcript | Out-Null
+        try { Stop-Transcript | Out-Null } catch {}
         exit 1
     }
     Write-Ok 'winget installed successfully.'
@@ -1110,22 +1147,30 @@ if ($Memory -le 0)   { $Memory    = Read-DefaultInt 'Memory in MB'     $yamlConf
 if ($DiskGB -le 0)   { $DiskGB    = Read-DefaultInt 'Disk size in GB'  $yamlConfig.vm.disk_gb 10 500 }
 if (-not $PrivateIP) { $PrivateIP = Read-Default    'VM private IP'    $yamlConfig.vm.private_ip }
 
-# Validate IP format
-if ($PrivateIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') {
-    Write-Err "Invalid IP address format: $PrivateIP"
-    Stop-Transcript | Out-Null
+# Validate IP format and octet ranges
+$ipValid = $PrivateIP -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'
+if ($ipValid) {
+    $octets = $PrivateIP -split '\.' | ForEach-Object { [int]$_ }
+    $ipValid = @($octets | Where-Object { $_ -gt 255 }).Count -eq 0
+}
+if (-not $ipValid) {
+    Write-Err "Invalid IP address: $PrivateIP"
+    try { Stop-Transcript | Out-Null } catch {}
     exit 1
 }
 
 # Credentials: CLI params > env.yaml > interactive prompt
 $credentialsEnteredInteractively = $false
-$creds = $yamlConfig.credentials
+$creds = if ($yamlConfig.ContainsKey('credentials') -and $null -ne $yamlConfig.credentials) { $yamlConfig.credentials } else { @{} }
+if ($creds -isnot [hashtable]) {
+    $ht = @{}; $creds.PSObject.Properties | ForEach-Object { $ht[$_.Name] = $_.Value }; $creds = $ht
+}
 
 if (-not $PSBoundParameters.ContainsKey('GitHubToken')) {
     if ($creds.ContainsKey('github_token') -and $creds.github_token) {
         $GitHubToken = $creds.github_token
         Write-Ok 'GitHub token loaded from env.yaml'
-    } else {
+    } elseif (-not $SkipConfirm) {
         $GitHubToken = Read-Secret 'GitHub token     (optional, Enter to skip)'
         if ($GitHubToken) { $credentialsEnteredInteractively = $true }
     }
@@ -1134,7 +1179,7 @@ if (-not $PSBoundParameters.ContainsKey('DockerHubUser')) {
     if ($creds.ContainsKey('dockerhub_user') -and $creds.dockerhub_user) {
         $DockerHubUser = $creds.dockerhub_user
         Write-Ok "Docker Hub user loaded from env.yaml ($DockerHubUser)"
-    } else {
+    } elseif (-not $SkipConfirm) {
         $DockerHubUser = (Read-Host '  Docker Hub user  (optional, Enter to skip)').Trim()
         if ($DockerHubUser) { $credentialsEnteredInteractively = $true }
     }
@@ -1143,14 +1188,17 @@ if (-not $PSBoundParameters.ContainsKey('DockerHubToken')) {
     if ($creds.ContainsKey('dockerhub_token') -and $creds.dockerhub_token) {
         $DockerHubToken = $creds.dockerhub_token
         Write-Ok 'Docker Hub token loaded from env.yaml'
-    } else {
+    } elseif (-not $SkipConfirm) {
         $DockerHubToken = Read-Secret 'Docker Hub token (optional, Enter to skip)'
         if ($DockerHubToken) { $credentialsEnteredInteractively = $true }
     }
 }
 
 Write-Ok "VM=$VMName  CPUs=$CPUs  RAM=${Memory}MB  Disk=${DiskGB}GB  IP=$PrivateIP"
-Write-Ok "Ports: $(($yamlConfig.ports | ForEach-Object { "$($_.guest):$($_.host)" }) -join ', ')"
+$portsDisplay = if ($yamlConfig.ContainsKey('ports') -and $yamlConfig.ports) {
+    ($yamlConfig.ports | ForEach-Object { "$($_.guest):$($_.host)" }) -join ', '
+} else { '(none)' }
+Write-Ok "Ports: $portsDisplay"
 Write-Ok "GitHub token: $(if ($GitHubToken) { '(provided)' } else { '(none)' })"
 Write-Ok "Docker Hub: $(if ($DockerHubUser) { "$DockerHubUser (provided)" } else { '(none)' })"
 
@@ -1160,7 +1208,7 @@ if (-not $SkipConfirm) {
     $confirm = Read-Host '  Proceed with this configuration? (Y/n)'
     if ($confirm -and $confirm -notmatch '^[Yy]') {
         Write-Warn 'Aborted by user.'
-        Stop-Transcript | Out-Null
+        try { Stop-Transcript | Out-Null } catch {}
         exit 0
     }
 }
@@ -1171,19 +1219,23 @@ if ($credentialsEnteredInteractively -and -not $SkipConfirm) {
     if ($saveCreds -match '^[Yy]') {
         $envFile = Join-Path $VagrantDir 'env.yaml'
         if (Test-Path $envFile) {
-            $envYaml = Get-Content $envFile -Raw | ConvertFrom-Yaml
+            $envYaml = try { Get-Content $envFile -Raw | ConvertFrom-Yaml } catch { $null }
+            if ($null -eq $envYaml) { $envYaml = [ordered]@{} }
         } else {
             $envYaml = [ordered]@{}
         }
+        if ($envYaml -isnot [hashtable] -and $envYaml -isnot [System.Collections.Specialized.OrderedDictionary]) {
+            $ht = [ordered]@{}; $envYaml.PSObject.Properties | ForEach-Object { $ht[$_.Name] = $_.Value }; $envYaml = $ht
+        }
 
-        if (-not $envYaml.ContainsKey('credentials')) {
+        if (-not $envYaml.Contains('credentials')) {
             $envYaml['credentials'] = [ordered]@{}
         }
         if ($GitHubToken)    { $envYaml.credentials['github_token']    = $GitHubToken }
         if ($DockerHubUser)  { $envYaml.credentials['dockerhub_user']  = $DockerHubUser }
         if ($DockerHubToken) { $envYaml.credentials['dockerhub_token'] = $DockerHubToken }
 
-        $envYaml | ConvertTo-Yaml | Set-Content -Path $envFile -Force -Encoding utf8
+        Set-Utf8NoBom -Path $envFile -Content ($envYaml | ConvertTo-Yaml)
         Write-Ok "Credentials saved to $envFile"
     }
 }
@@ -1207,9 +1259,11 @@ if ($IsWin) {
 
     function Install-VirtualBox {
         Write-Warn 'VirtualBox not found - installing via winget...'
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         $vboxOutput = winget install --id Oracle.VirtualBox --source winget `
             --accept-package-agreements --accept-source-agreements 2>&1
         $vboxExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
         $vboxOutput | ForEach-Object { Write-Host "    $_" }
         if ($vboxExit -ne 0) {
             Write-Err "winget install VirtualBox returned exit code $vboxExit"
@@ -1220,7 +1274,7 @@ if ($IsWin) {
         if (-not (Get-Command VBoxManage -ErrorAction SilentlyContinue)) {
             Write-Err 'VirtualBox install failed. Install manually from https://www.virtualbox.org/wiki/Downloads and re-run.'
             Write-Diagnostics -Context 'VBoxManage not found after install'
-            Read-Host 'Press Enter to exit'; exit 1
+            if (-not $SkipConfirm) { Read-Host 'Press Enter to exit' }; exit 1
         }
         Write-Ok "VirtualBox installed: $(VBoxManage --version 2>$null)"
     }
@@ -1240,13 +1294,15 @@ if ($IsWin) {
     # macOS
     function Install-VirtualBox {
         Write-Warn 'VirtualBox not found - installing via Homebrew...'
-        brew install --cask virtualbox
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        brew install --cask virtualbox 2>&1 | ForEach-Object { Write-Host "    $_" }
+        $ErrorActionPreference = $prevEAP
         Refresh-Path
 
         if (-not (Get-Command VBoxManage -ErrorAction SilentlyContinue)) {
             Write-Err 'VirtualBox install failed. Install manually from https://www.virtualbox.org/wiki/Downloads and re-run.'
             Write-Warn 'macOS may require you to allow the kernel extension in System Settings > Privacy & Security.'
-            Read-Host 'Press Enter to exit'; exit 1
+            if (-not $SkipConfirm) { Read-Host 'Press Enter to exit' }; exit 1
         }
     }
 
@@ -1291,19 +1347,25 @@ Write-Step 'Checking Vagrant'
 if (-not (Get-Command vagrant -ErrorAction SilentlyContinue)) {
     if ($IsWin) {
         Write-Warn 'Vagrant not found - installing via winget...'
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         $vagrantInstOutput = winget install --id HashiCorp.Vagrant --source winget `
             --accept-package-agreements --accept-source-agreements 2>&1
         $vagrantInstExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
         $vagrantInstOutput | ForEach-Object { Write-Host "    $_" }
         if ($vagrantInstExit -ne 0) { Write-Warn "winget install Vagrant returned exit code $vagrantInstExit" }
     } else {
         Write-Warn 'Vagrant not found - installing via Homebrew...'
-        brew install --cask vagrant
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        brew install --cask vagrant 2>&1 | ForEach-Object { Write-Host "    $_" }
+        $ErrorActionPreference = $prevEAP
     }
     Refresh-Path
 }
 Assert-Command 'vagrant' 'Reboot may be required after Vagrant install.'
-Write-Ok "$(vagrant --version)"
+$prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+Write-Ok "$(vagrant --version 2>$null)"
+$ErrorActionPreference = $prevEAP
 
 Write-Step 'Checking Vagrant plugins'
 Write-Ok 'No required Vagrant plugins (using native disk API)'
@@ -1315,14 +1377,18 @@ Write-Step 'Checking Helm (host)'
 if (-not (Get-Command helm -ErrorAction SilentlyContinue)) {
     if ($IsWin) {
         Write-Warn 'Helm not found - installing via winget...'
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         $helmInstOutput = winget install --id Helm.Helm --source winget `
             --accept-package-agreements --accept-source-agreements 2>&1
         $helmInstExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
         $helmInstOutput | ForEach-Object { Write-Host "    $_" }
         if ($helmInstExit -ne 0) { Write-Warn "winget install Helm returned exit code $helmInstExit" }
     } else {
         Write-Warn 'Helm not found - installing via Homebrew...'
-        brew install helm
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        brew install helm 2>&1 | ForEach-Object { Write-Host "    $_" }
+        $ErrorActionPreference = $prevEAP
     }
     Refresh-Path
 }
@@ -1333,27 +1399,66 @@ if (Get-Command helm -ErrorAction SilentlyContinue) {
 }
 
 # ─────────────────────────────────────────────────────────────
-# 3c. Install Docker CLI on host (if missing)
+# 3c. Install kubectl on host (if missing)
+# ─────────────────────────────────────────────────────────────
+Write-Step 'Checking kubectl (host)'
+if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
+    if ($IsWin) {
+        Write-Warn 'kubectl not found - installing via winget...'
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        $kubectlInstOutput = winget install --id Kubernetes.kubectl --source winget `
+            --accept-package-agreements --accept-source-agreements 2>&1
+        $kubectlInstExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+        $kubectlInstOutput | ForEach-Object { Write-Host "    $_" }
+        if ($kubectlInstExit -ne 0) { Write-Warn "winget install kubectl returned exit code $kubectlInstExit" }
+    } else {
+        Write-Warn 'kubectl not found - installing via Homebrew...'
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        brew install kubectl 2>&1 | ForEach-Object { Write-Host "    $_" }
+        $ErrorActionPreference = $prevEAP
+    }
+    Refresh-Path
+}
+if (Get-Command kubectl -ErrorAction SilentlyContinue) {
+    Write-Ok "kubectl $(kubectl version --client 2>$null | Select-Object -First 1)"
+} else {
+    Write-Warn 'kubectl not found after install attempt.'
+    if ($IsWin) {
+        Write-Warn 'Install manually: winget install Kubernetes.kubectl'
+    } else {
+        Write-Warn 'Install manually: brew install kubectl'
+    }
+}
+
+# ─────────────────────────────────────────────────────────────
+# 3d. Install Docker CLI on host (if missing)
 # ─────────────────────────────────────────────────────────────
 Write-Step 'Checking Docker CLI (host)'
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     if ($IsWin) {
         Write-Warn 'Docker CLI not found - installing via winget...'
         # Install just the CLI (not Docker Desktop)
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         $dockerInstOutput = winget install --id Docker.DockerCLI --source winget `
             --accept-package-agreements --accept-source-agreements 2>&1
         $dockerInstExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
         $dockerInstOutput | ForEach-Object { Write-Host "    $_" }
         if ($dockerInstExit -ne 0) {
             # Fallback: try the Docker CE CLI package
             Write-Warn "Docker.DockerCLI install returned exit code $dockerInstExit, trying Docker.DockerCli..."
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
             $dockerInstOutput2 = winget install --id Docker.DockerCli --source winget `
                 --accept-package-agreements --accept-source-agreements 2>&1
+            $ErrorActionPreference = $prevEAP
             $dockerInstOutput2 | ForEach-Object { Write-Host "    $_" }
         }
     } else {
         Write-Warn 'Docker CLI not found - installing via Homebrew...'
-        brew install docker
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        brew install docker 2>&1 | ForEach-Object { Write-Host "    $_" }
+        $ErrorActionPreference = $prevEAP
     }
     Refresh-Path
 }
@@ -1369,7 +1474,40 @@ if (Get-Command docker -ErrorAction SilentlyContinue) {
 }
 
 # ─────────────────────────────────────────────────────────────
-# 3d. Install Temurin JDK 21 on host (if missing)
+# 3e. Install k9s on host (if missing)
+# ─────────────────────────────────────────────────────────────
+Write-Step 'Checking k9s (host)'
+if (-not (Get-Command k9s -ErrorAction SilentlyContinue)) {
+    if ($IsWin) {
+        Write-Warn 'k9s not found - installing via winget...'
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        $k9sInstOutput = winget install --id Derailed.k9s --source winget `
+            --accept-package-agreements --accept-source-agreements 2>&1
+        $k9sInstExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+        $k9sInstOutput | ForEach-Object { Write-Host "    $_" }
+        if ($k9sInstExit -ne 0) { Write-Warn "winget install k9s returned exit code $k9sInstExit" }
+    } else {
+        Write-Warn 'k9s not found - installing via Homebrew...'
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        brew install derailed/k9s/k9s 2>&1 | ForEach-Object { Write-Host "    $_" }
+        $ErrorActionPreference = $prevEAP
+    }
+    Refresh-Path
+}
+if (Get-Command k9s -ErrorAction SilentlyContinue) {
+    Write-Ok "k9s installed"
+} else {
+    Write-Warn 'k9s not found after install attempt.'
+    if ($IsWin) {
+        Write-Warn 'Install manually: winget install Derailed.k9s'
+    } else {
+        Write-Warn 'Install manually: brew install derailed/k9s/k9s'
+    }
+}
+
+# ─────────────────────────────────────────────────────────────
+# 3f. Install Temurin JDK 21 on host (if missing)
 # ─────────────────────────────────────────────────────────────
 Write-Step 'Checking Temurin JDK 21 (host)'
 $hasTemurin21 = $false
@@ -1402,9 +1540,11 @@ if ($IsWin) {
 if (-not $hasTemurin21) {
     if ($IsWin) {
         Write-Warn 'Temurin JDK 21 not found - installing via winget...'
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         $javaInstOutput = winget install --id EclipseAdoptium.Temurin.21.JDK --source winget `
             --accept-package-agreements --accept-source-agreements 2>&1
         $javaInstExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
         $javaInstOutput | ForEach-Object { Write-Host "    $_" }
         if ($javaInstExit -ne 0) { Write-Warn "winget install Temurin JDK returned exit code $javaInstExit" }
     } else {
@@ -1468,7 +1608,7 @@ if ($IsWin) {
 }
 
 # ─────────────────────────────────────────────────────────────
-# 3e. Install Maven on host (if missing)
+# 3g. Install Maven on host (if missing)
 # ─────────────────────────────────────────────────────────────
 Write-Step 'Checking Maven (host)'
 if (-not (Get-Command mvn -ErrorAction SilentlyContinue)) {
@@ -1595,8 +1735,8 @@ if (Test-Path $sshDir) {
     }
 }
 
-# Resolve Node.js version placeholder
-$nodeVersionValue = if ($NodeVersion) { $NodeVersion } else { 'lts' }
+# Resolve Node.js version placeholder — NodeSource requires a numeric major version
+$nodeVersionValue = if ($NodeVersion -and $NodeVersion -ne 'lts') { $NodeVersion } else { '22' }
 
 # Resolve k3s version placeholder
 $k3sVersionValue = if ($K3sVersion) { $K3sVersion } else { '' }
@@ -1652,8 +1792,8 @@ Vagrant.configure("2") do |config|
   end
 
   # -- Timeouts --
-  config.vm.boot_timeout      = 600
-  config.ssh.connect_timeout  = 60
+  config.vm.boot_timeout      = 900
+  config.ssh.connect_timeout  = 120
 
   # -- Synced folder --
   config.vm.synced_folder "%%WORKSPACE%%", "/home/vagrant/workspace",
@@ -1721,7 +1861,7 @@ Vagrant.configure("2") do |config|
     export DEBIAN_FRONTEND=noninteractive
     if ! command -v docker &>/dev/null; then
       sudo install -m 0755 -d /etc/apt/keyrings
-      curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
       sudo chmod a+r /etc/apt/keyrings/docker.gpg
       echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
         https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
@@ -1738,7 +1878,7 @@ Vagrant.configure("2") do |config|
     cat <<'OVERRIDE' | sudo tee /etc/systemd/system/docker.service.d/override.conf > /dev/null
 [Service]
 ExecStart=
-ExecStart=/usr/bin/dockerd -H fd:// -H tcp://0.0.0.0:2375 --containerd=/run/containerd/containerd.sock
+ExecStart=/usr/bin/dockerd -H fd:// -H tcp://%%PRIVATE_IP%%:2375 --containerd=/run/containerd/containerd.sock
 OVERRIDE
     sudo systemctl daemon-reload
     sudo systemctl restart docker
@@ -1804,7 +1944,7 @@ OVERRIDE
   # --- Stage 7: Extra CLI tools ---
   config.vm.provision "shell", name: "cli-tools", env: { "GITHUB_TOKEN" => "%%GH_TOKEN%%" }, inline: <<-'SHELL'
     set -euo pipefail
-    trap 'echo "ERROR: cli-tools stage failed at line $LINENO (exit $?)" >&2; echo "  GitHub API rate limit remaining:"; curl -s https://api.github.com/rate_limit 2>/dev/null | grep -A2 '"rate"' || true; exit 1' ERR
+    trap 'echo "ERROR: cli-tools stage failed at line $LINENO (exit $?)" >&2; echo "  GitHub API rate limit remaining:"; curl -s https://api.github.com/rate_limit 2>/dev/null | grep -A2 rate || true; exit 1' ERR
     echo "  GitHub token: $(if [ -n "${GITHUB_TOKEN:-}" ]; then echo "provided (authenticated API)"; else echo "NOT SET (60 req/hr limit)"; fi)"
 
     # Helper: authenticated GitHub API calls (avoids 60-req/hr rate limit)
@@ -1822,9 +1962,15 @@ OVERRIDE
       local file="$1" checksums_url="$2" filename="$3"
       if [ -z "$checksums_url" ]; then return 0; fi
       local expected
-      curl -sL -o /tmp/checksums.txt "$checksums_url"
-      expected=$(grep "$filename" /tmp/checksums.txt 2>/dev/null | awk '{print $1}' | head -1)
-      rm -f /tmp/checksums.txt
+      local tmpcheck
+      tmpcheck=$(mktemp)
+      if ! curl -sL --fail -o "$tmpcheck" "$checksums_url"; then
+        echo "  ! Checksum file download failed for $filename, skipping verification"
+        rm -f "$tmpcheck"
+        return 0
+      fi
+      expected=$(grep "$filename" "$tmpcheck" 2>/dev/null | awk '{print $1}' | head -1)
+      rm -f "$tmpcheck"
       if [ -z "$expected" ]; then
         echo "  ! Checksum not found for $filename, skipping verification"
         return 0
@@ -2027,8 +2173,12 @@ OVERRIDE
 
     # kubeconfig for vagrant user
     mkdir -p /home/vagrant/.kube
-    sudo cp /etc/rancher/k3s/k3s.yaml /home/vagrant/.kube/config
-    sudo chown -R vagrant:vagrant /home/vagrant/.kube
+    if [ -f /etc/rancher/k3s/k3s.yaml ]; then
+      sudo cp /etc/rancher/k3s/k3s.yaml /home/vagrant/.kube/config
+      sudo chown -R vagrant:vagrant /home/vagrant/.kube
+    else
+      echo "  ! k3s kubeconfig not found, skipping .kube/config setup" >&2
+    fi
 
     # Idempotent .bashrc additions (only append if sentinel comment is absent)
     if ! grep -q '# == Dev VM environment ==' /home/vagrant/.bashrc 2>/dev/null; then
@@ -2036,7 +2186,7 @@ OVERRIDE
 
 # == Dev VM environment ==
 export KUBECONFIG=/home/vagrant/.kube/config
-export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))
+if command -v java &>/dev/null; then export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java)))); fi
 export MAVEN_HOME=/usr/share/maven
 export M2_HOME=$MAVEN_HOME
 export PATH=$JAVA_HOME/bin:$MAVEN_HOME/bin:$PATH
@@ -2172,7 +2322,7 @@ if (Test-Path $VagrantfilePath) {
         Write-Ok "Vagrantfile updated: $VagrantfilePath"
     }
 } else {
-    Set-Content -Path $VagrantfilePath -Value $Vagrantfile -Force -Encoding utf8
+    Set-Utf8NoBom -Path $VagrantfilePath -Content $Vagrantfile
     Write-Ok "Vagrantfile written to $VagrantfilePath"
 }
 
@@ -2188,13 +2338,83 @@ if ($DryRun) {
 # ─────────────────────────────────────────────────────────────
 Write-Step 'Starting VM (vagrant up) - this will take several minutes...'
 
+# Remove stale VirtualBox VM registration if one exists with the same name.
+# This can happen after a VirtualBox reinstall or aborted cleanup.
+if ($IsWin) { Add-VBoxToPath }
+if (Get-Command VBoxManage -ErrorAction SilentlyContinue) {
+    $prevEAPStale = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    $staleVM = VBoxManage showvminfo $VMName --machinereadable 2>$null
+    $staleVMExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAPStale
+    if ($staleVMExit -eq 0) {
+        $vmUUIDMatch = $staleVM | Select-String -Pattern '^UUID="([^"]+)"'
+        $vmUUID = if ($vmUUIDMatch) { $vmUUIDMatch.Matches[0].Groups[1].Value } else { '' }
+        $vmStateMatch = $staleVM | Select-String -Pattern '^VMState="([^"]+)"'
+        $vmState = if ($vmStateMatch) { $vmStateMatch.Matches[0].Groups[1].Value } else { 'unknown' }
+        # Only remove if Vagrant doesn't manage this specific VM (UUID mismatch or no id file)
+        $vagrantIdFile = Join-Path $VagrantDir ".vagrant\machines\default\virtualbox\id"
+        $vagrantUUID = if (Test-Path $vagrantIdFile) { (Get-Content $vagrantIdFile -Raw).Trim() } else { '' }
+        if ($vagrantUUID -ne $vmUUID) {
+            Write-Warn "Found stale VirtualBox VM '$VMName' (state: $vmState) not managed by Vagrant. Removing..."
+            $prevEAPStale = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            if ($vmState -eq 'running') {
+                VBoxManage controlvm $VMName poweroff 2>$null | Out-Null
+                Start-Sleep -Seconds 2
+            }
+            VBoxManage unregistervm $VMName --delete 2>$null | Out-Null
+            $unregExit = $LASTEXITCODE
+            $ErrorActionPreference = $prevEAPStale
+            if ($unregExit -eq 0) {
+                Write-Ok "Removed stale VM '$VMName'."
+            } else {
+                Write-Err "Failed to remove stale VM '$VMName'. Remove it manually: VBoxManage unregistervm $VMName --delete"
+                Write-Diagnostics -Context "stale VM removal failed"
+                exit 1
+            }
+        }
+    }
+}
+
 # Temporarily relax error handling — vagrant writes progress and warnings to
 # stderr, which PowerShell's StrictMode treats as terminating errors.
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
-$vagrantOutput = vagrant up 2>&1
-$vagrantExitCode = $LASTEXITCODE
-$vagrantOutput | ForEach-Object { Write-Host $_ }
+
+# Retry vagrant up on boot timeout — first boot on Windows can be slow due to
+# disk resize, SSH key setup, and VirtualBox/Hyper-V compatibility delays.
+$maxAttempts = 3
+$vagrantExitCode = 1
+for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+    if ($attempt -gt 1) {
+        Write-Warn "Retrying vagrant up (attempt $attempt of $maxAttempts)..."
+        # VM may already be running — use --no-provision to just wait for SSH
+        $vagrantOutput = vagrant up --no-provision 2>&1
+    } else {
+        $vagrantOutput = vagrant up 2>&1
+    }
+    $vagrantExitCode = $LASTEXITCODE
+    $vagrantOutput | ForEach-Object { Write-Host $_ }
+
+    if ($vagrantExitCode -eq 0) { break }
+
+    $isBootTimeout = ($vagrantOutput | Out-String) -match 'Timed out while waiting for the machine to boot'
+    if (-not $isBootTimeout -or $attempt -eq $maxAttempts) { break }
+
+    Write-Warn 'Boot timeout detected — VM may still be starting. Waiting 30 seconds before retry...'
+    Start-Sleep -Seconds 30
+}
+
+# If first vagrant up timed out but a retry connected without provisioning, run provisioning now
+if ($vagrantExitCode -eq 0 -and $attempt -gt 1) {
+    Write-Step 'Running provisioning (skipped during retry)...'
+    $provOutput = vagrant provision 2>&1
+    $provExitCode = $LASTEXITCODE
+    $provOutput | ForEach-Object { Write-Host $_ }
+    if ($provExitCode -ne 0) {
+        $vagrantExitCode = $provExitCode
+    }
+}
+
 $ErrorActionPreference = $prevEAP
 
 if ($vagrantExitCode -ne 0) {
@@ -2243,7 +2463,8 @@ echo "=== END DIAGNOSTICS ==="
             }
             Write-Ok 'Provisioning retry succeeded!'
             Write-Step 'Running post-retry repair checks'
-            Invoke-Repair -Quiet | Out-Null
+            $retryRepairOk = Invoke-Repair -Quiet
+            if (-not $retryRepairOk) { Write-Warn 'Post-retry repair found issues.' }
         } else {
             Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
             exit $vagrantExitCode
@@ -2267,10 +2488,15 @@ if (-not (Test-Path $kubeconfigDir)) {
 }
 
 # Pull the kubeconfig from the VM and rewrite the server address
-$prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'
+$prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
 $kubeconfigContent = vagrant ssh -c "sudo cat /etc/rancher/k3s/k3s.yaml" 2>$null |
     ForEach-Object { $_ -replace 'server: https://127\.0\.0\.1:6443', "server: https://${PrivateIP}:6443" }
-if ($kubeconfigContent) { Set-Utf8NoBom -Path $kubeconfigDest -Content $kubeconfigContent }
+$kubeconfigRaw = ($kubeconfigContent | Out-String)
+if ($kubeconfigRaw -match 'apiVersion:') {
+    Set-Utf8NoBom -Path $kubeconfigDest -Content $kubeconfigContent
+} else {
+    Write-Warn 'Kubeconfig content from VM does not look valid (missing apiVersion). Skipping.'
+}
 $ErrorActionPreference = $prevEAP
 
 if (Test-Path $kubeconfigDest) {
@@ -2298,12 +2524,7 @@ if (Test-Path $kubeconfigDest) {
         }
         $env:KUBECONFIG = $prevKC
     } else {
-        Write-Warn 'kubectl not found on host. Install it to manage the cluster:'
-        if ($IsWin) {
-            Write-Host '    winget install --id Kubernetes.kubectl' -ForegroundColor White
-        } else {
-            Write-Host '    brew install kubectl' -ForegroundColor White
-        }
+        Write-Warn 'kubectl not found on host. Connectivity test skipped.'
     }
 } else {
     Write-Warn 'Could not extract kubeconfig from VM. SSH in and copy manually.'
@@ -2323,15 +2544,19 @@ if (-not $repairOk) {
 # 9. Create baseline snapshot
 # ─────────────────────────────────────────────────────────────
 Write-Step 'Creating baseline snapshot'
-$prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-vagrant snapshot save fresh-install 2>&1 | ForEach-Object { Write-Host "  $_" }
-$snapshotExitCode = $LASTEXITCODE
-$ErrorActionPreference = $prevEAP
+if ($repairOk) {
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    vagrant snapshot save fresh-install 2>&1 | ForEach-Object { Write-Host "  $_" }
+    $snapshotExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
 
-if ($snapshotExitCode -eq 0) {
-    Write-Ok "Snapshot 'fresh-install' saved. Restore with: vagrant snapshot restore fresh-install"
+    if ($snapshotExitCode -eq 0) {
+        Write-Ok "Snapshot 'fresh-install' saved. Restore with: vagrant snapshot restore fresh-install"
+    } else {
+        Write-Warn 'Snapshot failed (non-critical). You can create one manually later.'
+    }
 } else {
-    Write-Warn 'Snapshot failed (non-critical). You can create one manually later.'
+    Write-Warn 'Skipping snapshot due to unresolved health issues.'
 }
 
 # ─────────────────────────────────────────────────────────────
