@@ -78,3 +78,6 @@ ports:
   - guest: 8090
     host: 8090
     description: Kafka UI
+  - guest: 30500
+    host: 30500
+    description: Local Docker Registry
